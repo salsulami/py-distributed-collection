@@ -128,6 +128,8 @@ def handle_command(
         return True, [peer.as_dict() for peer in peers]
     if cmd == "members":
         return True, [member.as_dict() for member in node.members()]
+    if cmd == "stats":
+        return True, node.stats()
 
     if cmd == "map_put":
         target = node.get_map(str(command["name"]))

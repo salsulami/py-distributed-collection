@@ -5,9 +5,12 @@ The protocol intentionally stays simple:
 
 1. Every TCP frame starts with a 4-byte unsigned big-endian payload length.
 2. The payload is UTF-8 JSON encoded.
-3. Messages use the common envelope shape:
+3. Messages include ``protocol_version`` for compatibility checks.
+4. Messages use the common envelope shape:
 
-   ``{"kind": "...", "cluster": "...", "payload": {...}}``
+   ``{"kind": "...", "cluster": "...", "payload": {...}, "protocol_version": 1}``
+
+5. When configured, envelopes are authenticated with HMAC-SHA256 signatures.
 
 This design keeps interoperability straightforward and makes on-wire traffic
 easy to inspect during debugging.
@@ -15,16 +18,20 @@ easy to inspect during debugging.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import socket
 import struct
 from enum import Enum
 from typing import Any
 
-from .exceptions import ProtocolDecodeError
+from .exceptions import AuthenticationError, ProtocolDecodeError, ProtocolVersionError
 
 _HEADER = struct.Struct("!I")
 _MAX_FRAME_BYTES = 8 * 1024 * 1024
+PROTOCOL_VERSION = 1
+_AUTH_ALGORITHM = "hmac-sha256"
 
 
 class MessageKind(str, Enum):
@@ -53,7 +60,96 @@ class MessageKind(str, Enum):
     ERROR = "error"
 
 
-def make_message(kind: MessageKind, cluster: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _canonical_message_bytes(message: dict[str, Any]) -> bytes:
+    """
+    Return deterministic JSON bytes for message signing.
+
+    The ``auth`` field is excluded to avoid self-referential signatures.
+    """
+    unsigned = {key: value for key, value in message.items() if key != "auth"}
+    return json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+
+def attach_authentication(message: dict[str, Any], security_token: str | None) -> dict[str, Any]:
+    """
+    Attach HMAC authentication metadata to a message envelope.
+
+    Parameters
+    ----------
+    message:
+        Envelope dictionary.
+    security_token:
+        Shared secret used for HMAC signing. When ``None``, message is returned
+        unchanged.
+    """
+    if security_token is None:
+        return message
+    token = security_token.encode("utf-8")
+    signature = hmac.new(token, _canonical_message_bytes(message), hashlib.sha256).hexdigest()
+    with_auth = dict(message)
+    with_auth["auth"] = {"alg": _AUTH_ALGORITHM, "sig": signature}
+    return with_auth
+
+
+def verify_authentication(message: dict[str, Any], security_token: str | None) -> bool:
+    """
+    Validate optional HMAC authentication metadata.
+
+    Returns
+    -------
+    bool
+        ``True`` when authentication is valid or security is disabled.
+    """
+    if security_token is None:
+        return True
+    auth = message.get("auth")
+    if not isinstance(auth, dict):
+        return False
+    if auth.get("alg") != _AUTH_ALGORITHM:
+        return False
+    given = auth.get("sig")
+    if not isinstance(given, str):
+        return False
+    token = security_token.encode("utf-8")
+    expected = hmac.new(token, _canonical_message_bytes(message), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(given, expected)
+
+
+def assert_protocol_compatible(message: dict[str, Any]) -> None:
+    """
+    Raise if message protocol version is not supported.
+
+    Parameters
+    ----------
+    message:
+        Decoded message envelope.
+    """
+    version = message.get("protocol_version")
+    if version != PROTOCOL_VERSION:
+        raise ProtocolVersionError(
+            f"Incompatible protocol version {version!r}; expected {PROTOCOL_VERSION!r}."
+        )
+
+
+def assert_authenticated(message: dict[str, Any], security_token: str | None) -> None:
+    """
+    Raise when message authentication fails.
+
+    This helper is intentionally separate from frame decoding so callers can
+    choose where they enforce authentication boundaries.
+    """
+    if not verify_authentication(message, security_token):
+        raise AuthenticationError("Message authentication failed.")
+
+
+def make_message(
+    kind: MessageKind,
+    cluster: str,
+    payload: dict[str, Any],
+    *,
+    sender_node_id: str | None = None,
+    security_token: str | None = None,
+) -> dict[str, Any]:
     """
     Build a protocol message envelope.
 
@@ -66,7 +162,15 @@ def make_message(kind: MessageKind, cluster: str, payload: dict[str, Any]) -> di
     payload:
         Message-specific body.
     """
-    return {"kind": kind.value, "cluster": cluster, "payload": payload}
+    envelope: dict[str, Any] = {
+        "kind": kind.value,
+        "cluster": cluster,
+        "protocol_version": PROTOCOL_VERSION,
+        "payload": payload,
+    }
+    if sender_node_id is not None:
+        envelope["sender_node_id"] = sender_node_id
+    return attach_authentication(envelope, security_token)
 
 
 def encode_frame(message: dict[str, Any]) -> bytes:

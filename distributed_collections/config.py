@@ -7,6 +7,9 @@ This module centralizes all tunable runtime settings used by the cluster node:
 * static seed peer discovery
 * multicast discovery
 * protocol and retry timeouts
+* transport security and authentication
+* async replication retry behavior
+* snapshot persistence
 
 The configuration classes are intentionally explicit and heavily documented to
 make deployment behavior easy to reason about in multi-node environments.
@@ -108,6 +111,51 @@ class MulticastDiscoveryConfig:
 
 
 @dataclass(slots=True)
+class SecurityConfig:
+    """
+    Security settings for cluster transport authentication.
+
+    The current runtime supports shared-token HMAC signatures over all TCP
+    protocol messages. When ``shared_token`` is set, every outbound message is
+    signed and every inbound message must pass signature validation.
+    """
+
+    shared_token: str | None = None
+
+
+@dataclass(slots=True)
+class ReplicationConfig:
+    """
+    Replication delivery settings for asynchronous operation fan-out.
+
+    Notes
+    -----
+    Replication workers run in background daemon threads and retry failed peer
+    deliveries with exponential backoff.
+    """
+
+    worker_threads: int = 2
+    max_retries: int = 4
+    initial_backoff_seconds: float = 0.05
+    max_backoff_seconds: float = 1.0
+    member_failure_threshold: int = 5
+
+
+@dataclass(slots=True)
+class PersistenceConfig:
+    """
+    Snapshot persistence settings for node restart recovery.
+
+    When enabled, nodes periodically flush full in-memory snapshots to the
+    configured JSON file path and reload it on startup.
+    """
+
+    enabled: bool = False
+    snapshot_path: str = "cluster_snapshot.json"
+    fsync: bool = True
+
+
+@dataclass(slots=True)
 class ClusterConfig:
     """
     Top-level runtime configuration used by :class:`ClusterNode`.
@@ -137,6 +185,13 @@ class ClusterConfig:
     auto_sync_on_join:
         If true, the node requests a full data snapshot from a discovered peer
         right after join.
+    security:
+        Transport authentication settings. Use a non-empty shared token in
+        production deployments.
+    replication:
+        Asynchronous replication queue and retry behavior.
+    persistence:
+        Local snapshot persistence and restart recovery behavior.
     """
 
     cluster_name: str = "default"
@@ -151,6 +206,35 @@ class ClusterConfig:
     socket_timeout_seconds: float = 2.0
     reconnect_interval_seconds: float = 3.0
     auto_sync_on_join: bool = True
+    security: SecurityConfig = field(default_factory=SecurityConfig)
+    replication: ReplicationConfig = field(default_factory=ReplicationConfig)
+    persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+
+    def __post_init__(self) -> None:
+        """Validate configuration values that affect runtime safety."""
+        if not self.cluster_name:
+            raise ValueError("ClusterConfig.cluster_name must be non-empty.")
+        if self.socket_timeout_seconds <= 0:
+            raise ValueError("ClusterConfig.socket_timeout_seconds must be > 0.")
+        if self.reconnect_interval_seconds < 0:
+            raise ValueError("ClusterConfig.reconnect_interval_seconds must be >= 0.")
+
+        if self.replication.worker_threads <= 0:
+            raise ValueError("ReplicationConfig.worker_threads must be >= 1.")
+        if self.replication.max_retries <= 0:
+            raise ValueError("ReplicationConfig.max_retries must be >= 1.")
+        if self.replication.initial_backoff_seconds < 0:
+            raise ValueError("ReplicationConfig.initial_backoff_seconds must be >= 0.")
+        if self.replication.max_backoff_seconds < self.replication.initial_backoff_seconds:
+            raise ValueError(
+                "ReplicationConfig.max_backoff_seconds must be >= initial_backoff_seconds."
+            )
+        if self.replication.member_failure_threshold <= 0:
+            raise ValueError("ReplicationConfig.member_failure_threshold must be >= 1.")
+
+        token = self.security.shared_token
+        if token is not None and not token.strip():
+            raise ValueError("SecurityConfig.shared_token cannot be blank when provided.")
 
     @property
     def advertise_address(self) -> NodeAddress:

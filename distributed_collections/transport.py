@@ -7,6 +7,8 @@ The transport module provides two focused primitives:
 * :func:`request_response` for outbound request/response exchange.
 
 Protocol framing and JSON encoding are delegated to :mod:`protocol`.
+Outbound request/response calls also enforce protocol-version compatibility and
+optional shared-token authentication.
 """
 
 from __future__ import annotations
@@ -17,7 +19,14 @@ import threading
 from typing import Any, Callable
 
 from .config import NodeAddress
-from .protocol import recv_frame, send_frame
+from .protocol import (
+    PROTOCOL_VERSION,
+    assert_authenticated,
+    assert_protocol_compatible,
+    attach_authentication,
+    recv_frame,
+    send_frame,
+)
 
 MessageHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -50,7 +59,12 @@ class _ClusterRequestHandler(socketserver.BaseRequestHandler):
             incoming = recv_frame(sock)
             response = self.server.message_handler(incoming)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - transport must not crash the server loop
-            response = {"kind": "error", "cluster": "", "payload": {"reason": str(exc)}}
+            response = {
+                "kind": "error",
+                "cluster": "",
+                "protocol_version": PROTOCOL_VERSION,
+                "payload": {"reason": str(exc)},
+            }
         send_frame(sock, response)
 
 
@@ -106,6 +120,8 @@ def request_response(
     peer: NodeAddress,
     message: dict[str, Any],
     timeout_seconds: float,
+    *,
+    security_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Send one TCP request to a peer and wait for one response.
@@ -118,8 +134,13 @@ def request_response(
         JSON-serializable message envelope.
     timeout_seconds:
         Socket timeout applied to connect/send/receive steps.
+    security_token:
+        Optional shared token for HMAC message authentication.
     """
     with socket.create_connection((peer.host, peer.port), timeout=timeout_seconds) as sock:
         sock.settimeout(timeout_seconds)
-        send_frame(sock, message)
-        return recv_frame(sock)
+        send_frame(sock, attach_authentication(message, security_token))
+        response = recv_frame(sock)
+        assert_protocol_compatible(response)
+        assert_authenticated(response, security_token)
+        return response

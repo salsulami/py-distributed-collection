@@ -16,6 +16,13 @@ Discovery supports both static seed peers and multicast peer discovery.
 Nodes exchange membership metadata and operation replication messages using a
 compact length-prefixed JSON protocol on TCP.
 
+Production hardening features include:
+
+* optional shared-token HMAC authentication for all TCP messages
+* asynchronous replication workers with retry/backoff and member eviction
+* optional on-disk snapshot persistence for restart recovery
+* runtime counters via :meth:`distributed_collections.cluster.ClusterNode.stats`
+
 Typical usage::
 
     from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
@@ -41,6 +48,9 @@ from .config import (
     DiscoveryMode,
     MulticastDiscoveryConfig,
     NodeAddress,
+    PersistenceConfig,
+    ReplicationConfig,
+    SecurityConfig,
     StaticDiscoveryConfig,
 )
 from .primitives import (
@@ -60,5 +70,8 @@ __all__ = [
     "DistributedTopic",
     "MulticastDiscoveryConfig",
     "NodeAddress",
+    "PersistenceConfig",
+    "ReplicationConfig",
+    "SecurityConfig",
     "StaticDiscoveryConfig",
 ]

@@ -28,6 +28,24 @@ class ProtocolDecodeError(DistributedCollectionsError):
     """
 
 
+class ProtocolVersionError(DistributedCollectionsError):
+    """
+    Raised when an incoming message uses an incompatible protocol version.
+
+    Nodes in one cluster should run protocol-compatible library versions to
+    avoid undefined replication or handshake behavior.
+    """
+
+
+class AuthenticationError(DistributedCollectionsError):
+    """
+    Raised when message authentication fails.
+
+    Authentication can fail because the signature is missing, malformed, or
+    computed using a different shared token.
+    """
+
+
 class UnsupportedOperationError(DistributedCollectionsError):
     """
     Raised when a mutation action is unknown for the target collection type.

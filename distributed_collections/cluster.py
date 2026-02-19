@@ -1,13 +1,18 @@
 """
 Cluster node runtime for distributed collection replication.
 
-This module contains the primary orchestration class, :class:`ClusterNode`,
-which owns networking, peer discovery, membership tracking, and collection
-mutation replication.
+This module hosts the primary orchestration class, :class:`ClusterNode`.
+The node coordinates:
+
+* discovery and peer membership updates
+* request/response message handling over TCP
+* asynchronous replication with retry/backoff
+* optional snapshot persistence for restart recovery
 """
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 import uuid
@@ -22,20 +27,32 @@ from .discovery import (
     discover_static_peers,
     merge_discovery_results,
 )
-from .exceptions import ClusterNotRunningError
+from .exceptions import (
+    AuthenticationError,
+    ClusterNotRunningError,
+    ProtocolVersionError,
+)
+from .persistence import SnapshotPersistence
 from .primitives import DistributedList, DistributedMap, DistributedQueue, DistributedTopic
-from .protocol import MessageKind, make_message
+from .protocol import (
+    MessageKind,
+    assert_authenticated,
+    assert_protocol_compatible,
+    make_message,
+)
 from .store import ClusterDataStore
 from .transport import TcpTransportServer, request_response
+
+_REPLICATION_SENTINEL: tuple[NodeAddress, dict[str, Any], int] | None = None
 
 
 class ClusterNode:
     """
-    Runtime container for distributed collections on one Python process.
+    Runtime container for distributed collections in one Python process.
 
-    A node exposes distributed data structures (map/list/queue/topic), accepts
-    inbound TCP operations from peers, and replicates local mutations to known
-    members. Discovery can use static seed peers, multicast, or both.
+    The node exposes distributed data structures (map/list/queue/topic), accepts
+    inbound TCP operations from peers, and asynchronously replicates local
+    mutations to known members.
     """
 
     def __init__(self, config: ClusterConfig) -> None:
@@ -45,8 +62,8 @@ class ClusterNode:
         Parameters
         ----------
         config:
-            Cluster runtime settings controlling network binding, discovery
-            strategies, and timeout values.
+            Runtime settings controlling transport, discovery, security,
+            replication retry policy, and persistence behavior.
         """
         self.config = config
         self.node_id = uuid.uuid4().hex
@@ -76,20 +93,59 @@ class ClusterNode:
         self._topic_handles: dict[str, DistributedTopic] = {}
         self._handle_lock = threading.RLock()
 
+        self._replication_queue: queue.Queue[
+            tuple[NodeAddress, dict[str, Any], int] | None
+        ] = queue.Queue()
+        self._replication_stop = threading.Event()
+        self._replication_threads: list[threading.Thread] = []
+        self._member_failures: dict[NodeAddress, int] = {}
+        self._member_failures_lock = threading.RLock()
+
+        self._persistence: SnapshotPersistence | None = None
+        if self.config.persistence.enabled:
+            self._persistence = SnapshotPersistence(
+                self.config.persistence.snapshot_path,
+                fsync=self.config.persistence.fsync,
+            )
+        self._persist_request = threading.Event()
+        self._persist_stop = threading.Event()
+        self._persist_thread: threading.Thread | None = None
+
+        self._stats_lock = threading.Lock()
+        self._stats: dict[str, int] = {
+            "local_mutations": 0,
+            "remote_mutations": 0,
+            "replication_enqueued": 0,
+            "replication_success": 0,
+            "replication_failures": 0,
+            "snapshot_load_success": 0,
+            "snapshot_load_failures": 0,
+            "snapshot_save_success": 0,
+            "snapshot_save_failures": 0,
+            "auth_failures": 0,
+            "protocol_failures": 0,
+            "dropped_messages": 0,
+            "members_evicted": 0,
+        }
+
     def start(self, *, join: bool = True) -> None:
         """
-        Start the TCP listener, optional multicast responder, and join process.
+        Start transport/runtime workers and optionally join cluster peers.
 
         Parameters
         ----------
         join:
-            If true, the node runs immediate peer discovery and handshake after
-            startup.
+            If true, run one immediate discovery and handshake cycle.
         """
         with self._lifecycle_lock:
             if self._running:
                 return
+
+            self._load_snapshot_if_enabled()
             self._transport.start()
+            self._start_replication_workers()
+            self._start_persistence_worker()
+
             if DiscoveryMode.MULTICAST in self.config.enabled_discovery:
                 self._discovery_responder = MulticastDiscoveryResponder(
                     cluster_name=self.config.cluster_name,
@@ -107,22 +163,25 @@ class ClusterNode:
 
     def stop(self) -> None:
         """
-        Stop the node and close network resources.
+        Stop network listeners and background workers.
 
-        Collection data remains in memory in the current process; this method
-        only affects networking/runtime behavior.
+        If persistence is enabled, the method flushes one final snapshot.
         """
         with self._lifecycle_lock:
             if not self._running:
                 return
+            self._running = False
+
             if self._discovery_responder:
                 self._discovery_responder.stop()
                 self._discovery_responder = None
+
+            self._stop_replication_workers()
+            self._stop_persistence_worker(flush=True)
             self._transport.stop()
-            self._running = False
 
     def close(self) -> None:
-        """Alias for :meth:`stop` for context-manager-like usage patterns."""
+        """Alias for :meth:`stop` for context-manager style usage."""
         self.stop()
 
     @property
@@ -138,7 +197,7 @@ class ClusterNode:
         Returns
         -------
         list[NodeAddress]
-            Addresses that were discovered in this join cycle.
+            Addresses discovered during this join cycle.
         """
         self._ensure_running()
 
@@ -171,27 +230,37 @@ class ClusterNode:
 
     def members(self) -> list[NodeAddress]:
         """
-        Return known member addresses excluding local node address.
-
-        Membership is best-effort and eventually consistent.
+        Return known peer addresses excluding this node.
         """
         with self._members_lock:
-            ordered = sorted(self._members, key=lambda a: (a.host, a.port))
+            ordered = sorted(self._members, key=lambda address: (address.host, address.port))
         return ordered
 
     def wait_for_next_join_window(self) -> None:
         """
         Sleep for the configured reconnect interval.
-
-        This helper is useful for user-managed reconnection loops.
         """
         time.sleep(float(self.config.reconnect_interval_seconds))
 
+    def stats(self) -> dict[str, Any]:
+        """
+        Return runtime counters for operational observability.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionary containing cumulative counters and live queue depth.
+        """
+        with self._stats_lock:
+            counters = dict(self._stats)
+        counters["member_count"] = len(self.members())
+        counters["replication_queue_depth"] = self._replication_queue.qsize()
+        counters["running"] = self.is_running
+        return counters
+
     def get_map(self, name: str) -> DistributedMap:
         """
-        Return a distributed map handle with the provided logical name.
-
-        The same object instance is reused per name for convenience.
+        Return a distributed map handle with the given logical name.
         """
         with self._handle_lock:
             handle = self._map_handles.get(name)
@@ -227,6 +296,23 @@ class ClusterNode:
                 self._topic_handles[name] = handle
             return handle
 
+    def _make_message(self, kind: MessageKind, payload: dict[str, Any]) -> dict[str, Any]:
+        """
+        Build signed protocol message using local cluster/security settings.
+        """
+        return make_message(
+            kind,
+            self.config.cluster_name,
+            payload,
+            sender_node_id=self.node_id,
+            security_token=self.config.security.shared_token,
+        )
+
+    def _inc_stat(self, key: str, delta: int = 1) -> None:
+        """Increment one runtime counter."""
+        with self._stats_lock:
+            self._stats[key] = self._stats.get(key, 0) + delta
+
     def _ensure_running(self) -> None:
         if not self.is_running:
             raise ClusterNotRunningError(
@@ -235,16 +321,18 @@ class ClusterNode:
 
     def _add_member(self, address: NodeAddress) -> None:
         """
-        Add one peer address to membership list if it is not local self.
+        Add one peer address to membership set if it is not local self.
         """
         if address == self.config.advertise_address:
             return
         with self._members_lock:
             self._members.add(address)
+        with self._member_failures_lock:
+            self._member_failures.pop(address, None)
 
     def _member_payload(self) -> list[dict[str, object]]:
         """
-        Return known members plus self address as serializable dictionaries.
+        Return known members plus self address as dictionaries.
         """
         members = self.members()
         members.append(self.config.advertise_address)
@@ -255,7 +343,7 @@ class ClusterNode:
 
     def _addresses_from_payload(self, raw_members: Any) -> list[NodeAddress]:
         """
-        Convert payload member list into validated addresses.
+        Parse payload member objects into validated addresses.
         """
         if not isinstance(raw_members, list):
             return []
@@ -271,19 +359,23 @@ class ClusterNode:
 
     def _handshake_peer(self, peer: NodeAddress) -> dict[str, Any] | None:
         """
-        Send handshake message to peer and return payload when successful.
+        Send handshake message to one peer and return response payload.
         """
-        request = make_message(
+        request = self._make_message(
             MessageKind.HANDSHAKE,
-            self.config.cluster_name,
             {
                 "node_id": self.node_id,
                 "address": self.config.advertise_address.as_dict(),
             },
         )
         try:
-            response = request_response(peer, request, self.config.socket_timeout_seconds)
-        except OSError:
+            response = request_response(
+                peer,
+                request,
+                self.config.socket_timeout_seconds,
+                security_token=self.config.security.shared_token,
+            )
+        except Exception:
             return None
         if response.get("kind") != MessageKind.HANDSHAKE_ACK.value:
             return None
@@ -294,13 +386,18 @@ class ClusterNode:
 
     def _sync_from_peer_list(self, peers: list[NodeAddress]) -> None:
         """
-        Request and load state snapshot from the first responsive peer.
+        Request and load a full snapshot from the first responsive peer.
         """
-        request = make_message(MessageKind.STATE_REQUEST, self.config.cluster_name, {})
+        request = self._make_message(MessageKind.STATE_REQUEST, {})
         for peer in peers:
             try:
-                response = request_response(peer, request, self.config.socket_timeout_seconds)
-            except OSError:
+                response = request_response(
+                    peer,
+                    request,
+                    self.config.socket_timeout_seconds,
+                    security_token=self.config.security.shared_token,
+                )
+            except Exception:
                 continue
             if response.get("kind") != MessageKind.STATE_RESPONSE.value:
                 continue
@@ -311,6 +408,7 @@ class ClusterNode:
             if not isinstance(snapshot, dict):
                 continue
             self._store.load_snapshot(snapshot)
+            self._schedule_persist()
             return
 
     def _record_operation(self, operation_id: str) -> bool:
@@ -332,20 +430,167 @@ class ClusterNode:
                 self._seen_operation_ids.discard(expired)
             return True
 
-    def _broadcast_operation(self, operation_payload: dict[str, Any]) -> None:
+    def _enqueue_replication(self, envelope: dict[str, Any]) -> None:
         """
-        Forward one operation payload to all known members via TCP.
+        Fan out one protocol message to all members via async workers.
         """
-        envelope = make_message(
-            MessageKind.OPERATION,
-            self.config.cluster_name,
-            operation_payload,
-        )
         for peer in self.members():
+            self._replication_queue.put((peer, envelope, 1))
+            self._inc_stat("replication_enqueued")
+
+    def _record_member_failure(self, peer: NodeAddress) -> None:
+        """
+        Track peer delivery failures and evict unstable members.
+        """
+        evicted = False
+        with self._member_failures_lock:
+            count = self._member_failures.get(peer, 0) + 1
+            self._member_failures[peer] = count
+            if count >= self.config.replication.member_failure_threshold:
+                self._member_failures.pop(peer, None)
+                evicted = True
+        if evicted:
+            with self._members_lock:
+                self._members.discard(peer)
+            self._inc_stat("members_evicted")
+
+    def _clear_member_failure(self, peer: NodeAddress) -> None:
+        """Clear peer failure counter after successful communication."""
+        with self._member_failures_lock:
+            self._member_failures.pop(peer, None)
+
+    def _start_replication_workers(self) -> None:
+        """Start background replication worker threads."""
+        self._replication_stop.clear()
+        self._replication_threads.clear()
+        for index in range(self.config.replication.worker_threads):
+            thread = threading.Thread(
+                target=self._replication_worker_loop,
+                name=f"cluster-replication-{index}",
+                daemon=True,
+            )
+            thread.start()
+            self._replication_threads.append(thread)
+
+    def _stop_replication_workers(self) -> None:
+        """Stop replication workers and wait briefly for shutdown."""
+        self._replication_stop.set()
+        for _ in self._replication_threads:
+            self._replication_queue.put(_REPLICATION_SENTINEL)
+        for thread in self._replication_threads:
+            thread.join(timeout=1.0)
+        self._replication_threads.clear()
+
+    def _replication_worker_loop(self) -> None:
+        """
+        Deliver enqueued replication messages with retry/backoff.
+        """
+        while not self._replication_stop.is_set():
+            task = self._replication_queue.get()
+            if task is _REPLICATION_SENTINEL:
+                return
+
+            peer, envelope, attempt = task
             try:
-                request_response(peer, envelope, self.config.socket_timeout_seconds)
-            except OSError:
+                response = request_response(
+                    peer,
+                    envelope,
+                    self.config.socket_timeout_seconds,
+                    security_token=self.config.security.shared_token,
+                )
+                if response.get("kind") == MessageKind.ERROR.value:
+                    raise OSError(f"Peer returned error: {response!r}")
+                self._clear_member_failure(peer)
+                self._inc_stat("replication_success")
+            except Exception:
+                self._inc_stat("replication_failures")
+                self._record_member_failure(peer)
+                if attempt >= self.config.replication.max_retries:
+                    continue
+                if self._replication_stop.is_set():
+                    continue
+                delay = min(
+                    self.config.replication.max_backoff_seconds,
+                    self.config.replication.initial_backoff_seconds * (2 ** (attempt - 1)),
+                )
+                if delay > 0:
+                    time.sleep(delay)
+                self._replication_queue.put((peer, envelope, attempt + 1))
+
+    def _load_snapshot_if_enabled(self) -> None:
+        """
+        Load persisted snapshot from disk before networking starts.
+        """
+        if self._persistence is None:
+            return
+        try:
+            snapshot = self._persistence.load()
+            if snapshot is None:
+                return
+            self._store.load_snapshot(snapshot)
+            self._inc_stat("snapshot_load_success")
+        except Exception:
+            self._inc_stat("snapshot_load_failures")
+
+    def _save_snapshot_now(self) -> None:
+        """
+        Persist a full snapshot immediately when persistence is enabled.
+        """
+        if self._persistence is None:
+            return
+        try:
+            self._persistence.save(self._store.create_snapshot())
+            self._inc_stat("snapshot_save_success")
+        except Exception:
+            self._inc_stat("snapshot_save_failures")
+
+    def _schedule_persist(self) -> None:
+        """
+        Coalesce snapshot persistence requests from mutation hot paths.
+        """
+        if self._persistence is None:
+            return
+        self._persist_request.set()
+
+    def _start_persistence_worker(self) -> None:
+        """
+        Start background snapshot flush worker when persistence is enabled.
+        """
+        if self._persistence is None:
+            return
+        self._persist_stop.clear()
+        self._persist_request.clear()
+        self._persist_thread = threading.Thread(
+            target=self._persistence_worker_loop,
+            name="cluster-persistence-worker",
+            daemon=True,
+        )
+        self._persist_thread.start()
+
+    def _stop_persistence_worker(self, *, flush: bool) -> None:
+        """
+        Stop persistence worker and optionally flush final snapshot.
+        """
+        if self._persistence is None:
+            return
+        self._persist_stop.set()
+        self._persist_request.set()
+        if self._persist_thread:
+            self._persist_thread.join(timeout=1.0)
+            self._persist_thread = None
+        if flush:
+            self._save_snapshot_now()
+
+    def _persistence_worker_loop(self) -> None:
+        """
+        Wait for persistence requests and flush snapshots in background.
+        """
+        while not self._persist_stop.is_set():
+            requested = self._persist_request.wait(timeout=0.5)
+            if not requested:
                 continue
+            self._persist_request.clear()
+            self._save_snapshot_now()
 
     def _submit_local_operation(
         self,
@@ -356,12 +601,12 @@ class ClusterNode:
         values: dict[str, Any] | None = None,
     ) -> Any:
         """
-        Apply a local mutation and replicate it to peers.
+        Apply local mutation and asynchronously replicate to peers.
 
         Returns
         -------
         Any
-            Local apply return value from the underlying data store.
+            Local return value from the data store.
         """
         self._ensure_running()
         payload: dict[str, Any] = {
@@ -379,24 +624,37 @@ class ClusterNode:
         if collection == "topic":
             if action == "publish":
                 self._dispatch_topic(name, payload.get("message"))
-                self._broadcast_operation(payload)
+                self._enqueue_replication(self._make_message(MessageKind.OPERATION, payload))
+                self._inc_stat("local_mutations")
             return None
 
         result = self._store.apply_mutation(payload)
-        self._broadcast_operation(payload)
+        self._enqueue_replication(self._make_message(MessageKind.OPERATION, payload))
+        self._inc_stat("local_mutations")
+        self._schedule_persist()
         return result
 
     def _handle_transport_message(self, message: dict[str, Any]) -> dict[str, Any]:
         """
         Process one inbound transport message and return protocol response.
         """
+        try:
+            assert_protocol_compatible(message)
+        except ProtocolVersionError as exc:
+            self._inc_stat("protocol_failures")
+            self._inc_stat("dropped_messages")
+            return self._make_message(MessageKind.ERROR, {"reason": str(exc)})
+        try:
+            assert_authenticated(message, self.config.security.shared_token)
+        except AuthenticationError as exc:
+            self._inc_stat("auth_failures")
+            self._inc_stat("dropped_messages")
+            return self._make_message(MessageKind.ERROR, {"reason": str(exc)})
+
         cluster = message.get("cluster")
         if cluster != self.config.cluster_name:
-            return make_message(
-                MessageKind.ERROR,
-                self.config.cluster_name,
-                {"reason": "cluster mismatch"},
-            )
+            self._inc_stat("dropped_messages")
+            return self._make_message(MessageKind.ERROR, {"reason": "cluster mismatch"})
 
         kind = message.get("kind")
         payload = message.get("payload", {})
@@ -406,27 +664,21 @@ class ClusterNode:
         if kind == MessageKind.HANDSHAKE.value:
             return self._handle_handshake(payload)
         if kind == MessageKind.STATE_REQUEST.value:
-            return make_message(
+            return self._make_message(
                 MessageKind.STATE_RESPONSE,
-                self.config.cluster_name,
                 {"snapshot": self._store.create_snapshot()},
             )
         if kind == MessageKind.OPERATION.value:
             self._handle_remote_operation(payload)
-            return make_message(
-                MessageKind.OPERATION,
-                self.config.cluster_name,
-                {"status": "ok"},
-            )
-        return make_message(
+            return self._make_message(MessageKind.OPERATION, {"status": "ok"})
+        return self._make_message(
             MessageKind.ERROR,
-            self.config.cluster_name,
             {"reason": f"unsupported message kind: {kind!r}"},
         )
 
     def _handle_handshake(self, payload: dict[str, Any]) -> dict[str, Any]:
         """
-        Register the peer from a handshake request and return known members.
+        Register peer from handshake request and return known members.
         """
         raw_address = payload.get("address")
         if isinstance(raw_address, dict):
@@ -434,9 +686,8 @@ class ClusterNode:
                 self._add_member(NodeAddress.from_dict(raw_address))
             except (KeyError, TypeError, ValueError):
                 pass
-        return make_message(
+        return self._make_message(
             MessageKind.HANDSHAKE_ACK,
-            self.config.cluster_name,
             {
                 "node_id": self.node_id,
                 "address": self.config.advertise_address.as_dict(),
@@ -461,12 +712,16 @@ class ClusterNode:
         if collection == "topic":
             if action == "publish":
                 self._dispatch_topic(name, payload.get("message"))
+                self._inc_stat("remote_mutations")
             return
+
         self._store.apply_mutation(payload)
+        self._inc_stat("remote_mutations")
+        self._schedule_persist()
 
     def _dispatch_topic(self, topic_name: str, message: Any) -> None:
         """
-        Invoke all subscriber callbacks for one topic message.
+        Invoke all subscriber callbacks for one topic publication.
         """
         with self._topic_lock:
             callbacks = list(self._topic_subscribers.get(topic_name, {}).values())
@@ -478,7 +733,7 @@ class ClusterNode:
 
     def _topic_subscribe(self, topic_name: str, callback: Callable[[Any], None]) -> str:
         """
-        Register a topic callback and return subscription ID.
+        Register topic callback and return subscription ID.
         """
         subscription_id = uuid.uuid4().hex
         with self._topic_lock:
@@ -497,7 +752,7 @@ class ClusterNode:
             return registry.pop(subscription_id, None) is not None
 
     def _topic_publish(self, topic_name: str, message: Any) -> None:
-        """Publish a topic message locally and replicate to peers."""
+        """Publish one topic message locally and replicate to peers."""
         self._submit_local_operation(
             collection="topic",
             name=topic_name,
@@ -516,8 +771,7 @@ class ClusterNode:
 
     def _map_get(self, map_name: str, key: str, default: Any = None) -> Any:
         """Internal map read helper."""
-        value = self._store.map_get(map_name, key, default)
-        return value
+        return self._store.map_get(map_name, key, default)
 
     def _map_remove(self, map_name: str, key: str) -> Any:
         """Internal map delete helper."""
@@ -577,14 +831,11 @@ class ClusterNode:
 
     def _list_pop(self, list_name: str, index: int | None = None) -> Any:
         """Internal list pop helper."""
-        payload = {"index": index}
-        if index is None:
-            payload = {"index": None}
         return self._submit_local_operation(
             collection="list",
             name=list_name,
             action="pop",
-            values=payload,
+            values={"index": index},
         )
 
     def _list_remove_value(self, list_name: str, value: Any) -> bool:

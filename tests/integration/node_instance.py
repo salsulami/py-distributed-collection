@@ -46,6 +46,7 @@ from distributed_collections import (  # noqa: E402
     ObservabilityConfig,
     SecurityConfig,
     StaticDiscoveryConfig,
+    create_node,
 )
 
 
@@ -110,6 +111,22 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Optional HTTP observability endpoint port; disabled when 0",
+    )
+    parser.add_argument(
+        "--store-backend",
+        default="memory",
+        choices=("memory", "redis"),
+        help="Collection store backend to use",
+    )
+    parser.add_argument(
+        "--redis-url",
+        default="redis://127.0.0.1:6379/0",
+        help="Redis URL used when --store-backend=redis",
+    )
+    parser.add_argument(
+        "--redis-namespace",
+        default="distributed-collections",
+        help="Redis key namespace used when --store-backend=redis",
     )
     return parser
 
@@ -228,7 +245,17 @@ def run() -> int:
                 port=args.observability_port if args.observability_port > 0 else 8085,
             ),
         )
-        node = ClusterNode(config)
+        backend_options: dict[str, Any] = {}
+        if args.store_backend == "redis":
+            backend_options = {
+                "redis_url": args.redis_url,
+                "namespace": args.redis_namespace,
+            }
+        node = create_node(
+            config,
+            backend=args.store_backend,
+            **backend_options,
+        )
         node.start(join=True)
     except Exception as exc:  # noqa: BLE001 - entrypoint should return clear startup error
         emit({"ok": False, "error": f"startup failed: {exc}"})

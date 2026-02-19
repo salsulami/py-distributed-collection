@@ -30,6 +30,25 @@ Production hardening features include:
 * optional HTTP health/metrics/traces observability endpoint
 * rolling-upgrade protocol compatibility ranges
 
+Redis-backed implementation is available as a separate plugin package:
+
+* project: ``distributed-python-collections-redis``
+* import path: ``distributed_collections_redis``
+* in Redis mode, map/list/queue state is centralized in Redis and not
+  synchronized through node-to-node collection replication
+
+Store switching can be done with one parameter:
+
+    from distributed_collections import create_node
+
+    node = create_node(config, backend="memory")
+    node = create_node(config, backend="redis", redis_url="redis://127.0.0.1:6379/0")
+
+Or with classmethod syntax:
+
+    node = ClusterNode.from_backend(config, backend="memory")
+    node = ClusterNode.from_backend(config, backend="redis", redis_url="redis://127.0.0.1:6379/0")
+
 Typical usage::
 
     from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
@@ -50,6 +69,7 @@ Typical usage::
 """
 
 from .cluster import ClusterNode
+from .backends import StoreBackend, available_backends, create_node, create_store
 from .config import (
     ACLConfig,
     ClusterConfig,
@@ -74,10 +94,16 @@ from .primitives import (
     DistributedQueue,
     DistributedTopic,
 )
+from .store import ClusterDataStore
+from .store_protocol import CollectionStore
 
 __all__ = [
     "ClusterConfig",
     "ClusterNode",
+    "StoreBackend",
+    "available_backends",
+    "create_node",
+    "create_store",
     "ACLConfig",
     "ConsensusConfig",
     "ConsistencyConfig",
@@ -87,6 +113,8 @@ __all__ = [
     "DistributedMap",
     "DistributedQueue",
     "DistributedTopic",
+    "ClusterDataStore",
+    "CollectionStore",
     "MulticastDiscoveryConfig",
     "NodeAddress",
     "ObservabilityConfig",

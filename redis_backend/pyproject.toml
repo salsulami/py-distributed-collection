@@ -3,24 +3,28 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "distributed-python-collections"
+name = "distributed-python-collections-redis"
 version = "0.1.0"
-description = "Hazelcast-inspired distributed collections for Python services."
-license = { file = "LICENSE" }
+description = "Redis backend plugin for distributed-python-collections."
 requires-python = ">=3.10"
 authors = [
   { name = "Distributed Collections Team" }
 ]
-keywords = ["distributed-systems", "collections", "tcp", "cluster", "hazelcast"]
+dependencies = [
+  "distributed-python-collections>=0.1.0",
+  "redis",
+]
+keywords = ["redis", "distributed-systems", "collections", "plugin"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "License :: OSI Approved :: MIT License",
-  "Operating System :: OS Independent",
   "Topic :: System :: Distributed Computing",
   "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-dependencies = []
+
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
-include = ["distributed_collections", "distributed_collections.*"]
+where = ["src"]
+include = ["distributed_collections_redis*"]

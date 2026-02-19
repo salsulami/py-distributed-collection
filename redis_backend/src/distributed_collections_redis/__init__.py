@@ -15,6 +15,11 @@ into Redis-backed state storage only when needed:
 
 Redis mode uses Redis as a shared source of truth for map/list/queue data, so
 cluster nodes do not need peer-to-peer state replication for those collections.
+
+Users can either import this package directly or use the core backend factory:
+
+    from distributed_collections import create_node
+    node = create_node(config, backend="redis", redis_url="redis://127.0.0.1:6379/0")
 """
 
 from .node import RedisClusterNode

@@ -66,6 +66,36 @@ class ClusterNode:
     orchestration for distributed map/list/queue/topic primitives.
     """
 
+    @classmethod
+    def from_backend(
+        cls,
+        config: ClusterConfig,
+        *,
+        backend: str = "memory",
+        **backend_options: Any,
+    ) -> "ClusterNode":
+        """
+        Build a node with a named store backend in one call.
+
+        Examples
+        --------
+        In-memory backend (default)::
+
+            node = ClusterNode.from_backend(config, backend="memory")
+
+        Redis backend (optional plugin)::
+
+            node = ClusterNode.from_backend(
+                config,
+                backend="redis",
+                redis_url="redis://127.0.0.1:6379/0",
+                namespace="orders",
+            )
+        """
+        from .backends import create_store
+
+        return cls(config, store=create_store(backend=backend, **backend_options))
+
     def __init__(self, config: ClusterConfig, *, store: CollectionStore | None = None) -> None:
         """
         Initialize runtime state from :class:`ClusterConfig`.

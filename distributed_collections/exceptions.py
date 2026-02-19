@@ -46,6 +46,24 @@ class AuthenticationError(DistributedCollectionsError):
     """
 
 
+class BackendConfigurationError(DistributedCollectionsError):
+    """
+    Raised when store backend configuration is invalid or incomplete.
+
+    Examples include selecting an unknown backend name or passing conflicting
+    options that the backend factory cannot interpret safely.
+    """
+
+
+class BackendNotAvailableError(DistributedCollectionsError):
+    """
+    Raised when an optional backend plugin is not installed.
+
+    For example, selecting the Redis backend without installing the
+    ``distributed-python-collections-redis`` package triggers this error.
+    """
+
+
 class UnsupportedOperationError(DistributedCollectionsError):
     """
     Raised when a mutation action is unknown for the target collection type.

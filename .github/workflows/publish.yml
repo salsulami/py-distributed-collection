@@ -1,0 +1,131 @@
+name: publish-packages
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package(s) to publish"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - core
+          - redis
+      repository:
+        description: "Target Python package index"
+        type: choice
+        required: true
+        default: pypi
+        options:
+          - pypi
+          - testpypi
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-core:
+    name: Build core package
+    if: ${{ github.event_name == 'push' || github.event.inputs.package == 'all' || github.event.inputs.package == 'core' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine
+
+      - name: Build core distribution
+        run: python -m build --outdir dist-core .
+
+      - name: Validate core distribution metadata
+        run: twine check dist-core/*
+
+      - name: Upload core artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: core-dist
+          path: dist-core/*
+          if-no-files-found: error
+
+  publish-core:
+    name: Publish core package
+    needs: build-core
+    if: ${{ needs.build-core.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download core artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: core-dist
+          path: dist-core
+
+      - name: Publish core package
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-core
+          user: __token__
+          password: ${{ github.event.inputs.repository == 'testpypi' && secrets.TEST_PYPI_API_TOKEN || secrets.PYPI_API_TOKEN }}
+          repository-url: ${{ github.event.inputs.repository == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}
+
+  build-redis:
+    name: Build Redis plugin package
+    if: ${{ github.event_name == 'push' || github.event.inputs.package == 'all' || github.event.inputs.package == 'redis' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade build twine
+
+      - name: Build redis plugin distribution
+        run: python -m build --outdir dist-redis redis_backend
+
+      - name: Validate redis plugin distribution metadata
+        run: twine check dist-redis/*
+
+      - name: Upload redis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-dist
+          path: dist-redis/*
+          if-no-files-found: error
+
+  publish-redis:
+    name: Publish Redis plugin package
+    needs: build-redis
+    if: ${{ needs.build-redis.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download redis artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: redis-dist
+          path: dist-redis
+
+      - name: Publish redis plugin package
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist-redis
+          user: __token__
+          password: ${{ github.event.inputs.repository == 'testpypi' && secrets.TEST_PYPI_API_TOKEN || secrets.PYPI_API_TOKEN }}
+          repository-url: ${{ github.event.inputs.repository == 'testpypi' && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

@@ -19,6 +19,14 @@ class CollectionStore(Protocol):
     runtime threads can call read/write methods simultaneously.
     """
 
+    is_centralized: bool
+    """
+    Indicates whether this backend is a centralized shared store.
+
+    When true, all nodes read/write the same external state store directly.
+    Cluster-level state replication for map/list/queue can therefore be skipped.
+    """
+
     def apply_mutation(self, mutation: dict[str, Any]) -> Any:
         """Apply one collection mutation and return action-specific result."""
 

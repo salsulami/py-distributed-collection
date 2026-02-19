@@ -12,6 +12,9 @@ into Redis-backed state storage only when needed:
         redis_url="redis://127.0.0.1:6379/0",
         namespace="orders-cluster",
     )
+
+Redis mode uses Redis as a shared source of truth for map/list/queue data, so
+cluster nodes do not need peer-to-peer state replication for those collections.
 """
 
 from .node import RedisClusterNode

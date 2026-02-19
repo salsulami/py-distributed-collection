@@ -34,6 +34,8 @@ Redis-backed implementation is available as a separate plugin package:
 
 * project: ``distributed-python-collections-redis``
 * import path: ``distributed_collections_redis``
+* in Redis mode, map/list/queue state is centralized in Redis and not
+  synchronized through node-to-node collection replication
 
 Typical usage::
 

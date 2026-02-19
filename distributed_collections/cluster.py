@@ -81,6 +81,7 @@ class ClusterNode:
         self.config = config
         self.node_id = uuid.uuid4().hex
         self._store: CollectionStore = store if store is not None else ClusterDataStore()
+        self._store_is_centralized = bool(getattr(self._store, "is_centralized", False))
 
         # Membership state
         self._members: set[NodeAddress] = set()
@@ -209,12 +210,14 @@ class ClusterNode:
             if self._running:
                 return
 
-            self._load_snapshot_if_enabled()
-            self._replay_wal_if_enabled()
+            if not self._store_is_centralized:
+                self._load_snapshot_if_enabled()
+                self._replay_wal_if_enabled()
 
             self._transport.start()
             self._start_replication_workers()
-            self._start_persistence_worker()
+            if not self._store_is_centralized:
+                self._start_persistence_worker()
             self._start_consensus_worker()
             self._start_observability_server()
 
@@ -259,7 +262,8 @@ class ClusterNode:
 
             self._stop_consensus_worker()
             self._stop_replication_workers()
-            self._stop_persistence_worker(flush=True)
+            if not self._store_is_centralized:
+                self._stop_persistence_worker(flush=True)
             self._stop_observability_server()
             self._transport.stop()
             self._trace("node_stopped")
@@ -380,7 +384,7 @@ class ClusterNode:
             ):
                 self._add_member(member_address, node_id=member_node_id)
 
-        if self.config.auto_sync_on_join and reachable_peers:
+        if self.config.auto_sync_on_join and reachable_peers and not self._store_is_centralized:
             self._sync_from_peer_list(reachable_peers)
         self._trace("join_completed", discovered=len(discovered), reachable=len(reachable_peers))
         return discovered
@@ -717,7 +721,11 @@ class ClusterNode:
             operation.update(values)
 
         mode = self.config.consistency.mode
-        if self.config.consensus.enabled and mode != ConsistencyMode.BEST_EFFORT:
+        if (
+            self.config.consensus.enabled
+            and mode != ConsistencyMode.BEST_EFFORT
+            and not self._is_centralized_data_operation(collection)
+        ):
             if not self._is_leader():
                 return self._forward_operation_to_leader(operation)
             if self.config.consensus.require_majority_for_writes and not self._leader_lease_valid():
@@ -742,10 +750,14 @@ class ClusterNode:
         if not self._record_operation(op_id):
             return None
 
+        collection_name = str(payload.get("collection", ""))
         self._append_wal_entry(payload)
         result = self._apply_payload(payload, source="local")
         self._inc_stat("local_mutations")
         self._schedule_persist()
+
+        if self._is_centralized_data_operation(collection_name):
+            return result
 
         # Commit strategy by consistency mode.
         mode = self.config.consistency.mode
@@ -825,6 +837,10 @@ class ClusterNode:
             raise PermissionError("ACL denied for sender operation")
 
         collection = str(payload.get("collection", ""))
+        if self._is_centralized_data_operation(collection):
+            # Centralized backends (for example Redis) are globally shared, so
+            # replicated map/list/queue payloads do not need local re-apply.
+            return
         if collection != "topic":
             self._append_wal_entry(payload)
 
@@ -1134,6 +1150,8 @@ class ClusterNode:
         """
         Load persisted snapshot state and metadata if configured.
         """
+        if self._store_is_centralized:
+            return
         if self._persistence is None:
             return
         try:
@@ -1163,6 +1181,8 @@ class ClusterNode:
         """
         Replay WAL entries after snapshot recovery.
         """
+        if self._store_is_centralized:
+            return
         if self._wal is None:
             return
         try:
@@ -1193,6 +1213,8 @@ class ClusterNode:
         """
         Append operation payload to WAL when enabled.
         """
+        if self._store_is_centralized and str(payload.get("collection", "")) != "topic":
+            return
         if self._wal is None:
             return
         if str(payload.get("collection", "")) == "topic":
@@ -1206,6 +1228,8 @@ class ClusterNode:
 
     def _schedule_persist(self) -> None:
         """Schedule asynchronous snapshot persistence flush."""
+        if self._store_is_centralized:
+            return
         if self._persistence is None:
             return
         self._persist_request.set()
@@ -1248,6 +1272,8 @@ class ClusterNode:
         """
         Persist snapshot + metadata and checkpoint WAL when due.
         """
+        if self._store_is_centralized:
+            return
         if self._persistence is None:
             return
         try:
@@ -1527,6 +1553,8 @@ class ClusterNode:
         """
         Request snapshot state from first responsive peer and load locally.
         """
+        if self._store_is_centralized:
+            return
         request = self._make_message(MessageKind.STATE_REQUEST, {})
         for peer in peers:
             try:
@@ -1706,6 +1734,15 @@ class ClusterNode:
             raise ClusterNotRunningError(
                 "Cluster node is not running. Call start() before using distributed collections."
             )
+
+    def _is_centralized_data_operation(self, collection: str) -> bool:
+        """
+        Return true when operation targets centralized backend state.
+
+        Topic traffic is excluded because it is transient pub/sub fan-out, not
+        persistent collection storage.
+        """
+        return self._store_is_centralized and collection != "topic"
 
     def _inc_stat(self, key: str, *, delta: int = 1) -> None:
         with self._stats_lock:

@@ -62,7 +62,13 @@ class RedisClusterDataStore:
     * map values are stored in Redis hashes
     * list values are stored in Redis lists
     * queue values are stored in Redis lists (head = left, tail = right)
+
+    Notes
+    -----
+    This backend is centralized: all cluster nodes access the same Redis state.
     """
+
+    is_centralized = True
 
     def __init__(
         self,

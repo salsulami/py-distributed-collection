@@ -27,6 +27,8 @@ class ClusterDataStore:
       internal state from accidental mutation by caller code.
     """
 
+    is_centralized = False
+
     def __init__(self) -> None:
         """Create empty collection containers and initialize lock state."""
         self._maps: dict[str, dict[str, Any]] = {}

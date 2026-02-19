@@ -15,6 +15,9 @@ class RedisClusterNode(ClusterNode):
     """
     :class:`ClusterNode` variant that persists collection state in Redis.
 
+    In this mode, map/list/queue data is directly read/written in Redis by all
+    nodes. Cluster transport is still used for membership and topic fan-out.
+
     Parameters
     ----------
     config:

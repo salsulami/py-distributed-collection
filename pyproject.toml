@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distributed-python-collections"
-version = "0.1.0"
+version = "0.1.1"
 description = "Hazelcast-inspired distributed collections for Python services."
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

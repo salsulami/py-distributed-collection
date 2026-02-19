@@ -280,6 +280,24 @@ class ConsistencyConfig:
 
 
 @dataclass(slots=True)
+class CPSubsystemConfig:
+    """
+    Strong-consistency coordination subsystem settings.
+
+    The CP subsystem currently provides distributed lock coordination and
+    enforces linearizable commit semantics for core collection mutations when
+    configured as mandatory.
+    """
+
+    enabled: bool = True
+    mandatory_for_core_mutations: bool = True
+    lock_default_lease_seconds: float = 15.0
+    lock_max_lease_seconds: float = 300.0
+    lock_retry_interval_seconds: float = 0.05
+    allow_reentrant_locks: bool = False
+
+
+@dataclass(slots=True)
 class ClusterConfig:
     """
     Top-level runtime configuration used by :class:`ClusterNode`.
@@ -322,6 +340,8 @@ class ClusterConfig:
         Leader election and split-brain protection settings.
     consistency:
         Mutation consistency guarantees for write commits.
+    cp:
+        CP subsystem behavior for strong-consistency coordination primitives.
     tls:
         TLS/mTLS transport settings.
     acl:
@@ -352,6 +372,7 @@ class ClusterConfig:
     wal: WriteAheadLogConfig = field(default_factory=WriteAheadLogConfig)
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
     consistency: ConsistencyConfig = field(default_factory=ConsistencyConfig)
+    cp: CPSubsystemConfig = field(default_factory=CPSubsystemConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     upgrade: UpgradeConfig = field(default_factory=UpgradeConfig)
 
@@ -394,6 +415,18 @@ class ClusterConfig:
             raise ValueError("ConsensusConfig.heartbeat_interval_seconds must be > 0.")
         if self.consensus.leader_lease_seconds <= 0:
             raise ValueError("ConsensusConfig.leader_lease_seconds must be > 0.")
+        if self.cp.lock_default_lease_seconds <= 0:
+            raise ValueError("CPSubsystemConfig.lock_default_lease_seconds must be > 0.")
+        if self.cp.lock_max_lease_seconds <= 0:
+            raise ValueError("CPSubsystemConfig.lock_max_lease_seconds must be > 0.")
+        if self.cp.lock_max_lease_seconds < self.cp.lock_default_lease_seconds:
+            raise ValueError(
+                "CPSubsystemConfig.lock_max_lease_seconds must be >= lock_default_lease_seconds."
+            )
+        if self.cp.lock_retry_interval_seconds <= 0:
+            raise ValueError("CPSubsystemConfig.lock_retry_interval_seconds must be > 0.")
+        if self.cp.enabled and not self.consensus.enabled:
+            raise ValueError("CPSubsystemConfig.enabled requires ConsensusConfig.enabled.")
         if self.wal.checkpoint_interval_operations <= 0:
             raise ValueError("WriteAheadLogConfig.checkpoint_interval_operations must be >= 1.")
         if self.upgrade.min_compatible_protocol_version <= 0:

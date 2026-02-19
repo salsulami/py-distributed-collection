@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distributed-python-collections-example"
-version = "0.1.1"
+version = "0.1.2"
 description = "Installable example project for distributed-python-collections."
 requires-python = ">=3.10"
 dependencies = [
-  "distributed-python-collections>=0.1.1",
+  "distributed-python-collections>=0.1.2",
 ]
 
 [project.optional-dependencies]
 redis = [
-  "distributed-python-collections-redis>=0.1.1",
+  "distributed-python-collections-redis>=0.1.2",
 ]
 
 [project.scripts]

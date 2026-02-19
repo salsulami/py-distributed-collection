@@ -82,6 +82,26 @@ class DiscoveryMode(str, Enum):
     MULTICAST = "multicast"
 
 
+class ConsistencyMode(str, Enum):
+    """
+    Write consistency modes for distributed mutations.
+
+    BEST_EFFORT
+        Local apply plus asynchronous replication queueing.
+    QUORUM
+        Requires acknowledgements from a majority of cluster members.
+    ALL
+        Requires acknowledgements from all known cluster members.
+    LINEARIZABLE
+        Enforces leader-routed writes and quorum commit semantics.
+    """
+
+    BEST_EFFORT = "best_effort"
+    QUORUM = "quorum"
+    ALL = "all"
+    LINEARIZABLE = "linearizable"
+
+
 @dataclass(slots=True)
 class StaticDiscoveryConfig:
     """
@@ -124,6 +144,38 @@ class SecurityConfig:
 
 
 @dataclass(slots=True)
+class TLSConfig:
+    """
+    TLS/mTLS transport configuration.
+
+    When ``enabled`` is true, TCP connections are wrapped with TLS using the
+    provided certificate/key files. Set ``require_client_cert`` for mTLS.
+    """
+
+    enabled: bool = False
+    certfile: str | None = None
+    keyfile: str | None = None
+    ca_file: str | None = None
+    require_client_cert: bool = False
+    server_hostname: str | None = None
+
+
+@dataclass(slots=True)
+class ACLConfig:
+    """
+    Access-control settings for remote mutation application.
+
+    ``sender_permissions`` maps remote sender node IDs to allowed action keys
+    like ``"map.put"`` or ``"queue.offer"``. A wildcard key ``"*"``
+    applies to all senders not explicitly listed.
+    """
+
+    enabled: bool = False
+    default_allow: bool = True
+    sender_permissions: dict[str, tuple[str, ...]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ReplicationConfig:
     """
     Replication delivery settings for asynchronous operation fan-out.
@@ -139,6 +191,10 @@ class ReplicationConfig:
     initial_backoff_seconds: float = 0.05
     max_backoff_seconds: float = 1.0
     member_failure_threshold: int = 5
+    queue_maxsize: int = 10_000
+    enqueue_timeout_seconds: float = 0.05
+    drop_on_overflow: bool = False
+    batch_size: int = 64
 
 
 @dataclass(slots=True)
@@ -153,6 +209,74 @@ class PersistenceConfig:
     enabled: bool = False
     snapshot_path: str = "cluster_snapshot.json"
     fsync: bool = True
+
+
+@dataclass(slots=True)
+class WriteAheadLogConfig:
+    """
+    Write-ahead log (WAL) settings for durable mutation journaling.
+
+    WAL records each ordered mutation before local apply. On startup, the log is
+    replayed after loading the latest snapshot.
+    """
+
+    enabled: bool = True
+    wal_path: str = "cluster_wal.log"
+    fsync_each_write: bool = False
+    checkpoint_interval_operations: int = 500
+
+
+@dataclass(slots=True)
+class ConsensusConfig:
+    """
+    Leader-election and split-brain protection settings.
+
+    The runtime uses a lightweight quorum election model with periodic
+    heartbeats. A leader only serves writes while its majority lease is valid.
+    """
+
+    enabled: bool = True
+    election_timeout_seconds: float = 2.0
+    heartbeat_interval_seconds: float = 0.5
+    leader_lease_seconds: float = 2.0
+    require_majority_for_writes: bool = True
+
+
+@dataclass(slots=True)
+class UpgradeConfig:
+    """
+    Protocol compatibility range for rolling upgrades.
+
+    Nodes reject messages whose protocol version falls outside this range.
+    """
+
+    min_compatible_protocol_version: int = 1
+    max_compatible_protocol_version: int = 1
+
+
+@dataclass(slots=True)
+class ObservabilityConfig:
+    """
+    Runtime observability settings.
+
+    Enables a lightweight HTTP endpoint exposing health and metrics surfaces.
+    """
+
+    enable_http: bool = False
+    host: str = "127.0.0.1"
+    port: int = 8085
+    enable_tracing: bool = True
+    trace_history_size: int = 2_000
+
+
+@dataclass(slots=True)
+class ConsistencyConfig:
+    """
+    Configures mutation consistency and commit timeouts.
+    """
+
+    mode: ConsistencyMode = ConsistencyMode.LINEARIZABLE
+    write_timeout_seconds: float = 3.0
 
 
 @dataclass(slots=True)
@@ -192,6 +316,20 @@ class ClusterConfig:
         Asynchronous replication queue and retry behavior.
     persistence:
         Local snapshot persistence and restart recovery behavior.
+    wal:
+        Write-ahead log durability settings.
+    consensus:
+        Leader election and split-brain protection settings.
+    consistency:
+        Mutation consistency guarantees for write commits.
+    tls:
+        TLS/mTLS transport settings.
+    acl:
+        Optional sender-based access control.
+    observability:
+        Health/metrics/tracing endpoint settings.
+    upgrade:
+        Protocol compatibility range used for rolling upgrades.
     """
 
     cluster_name: str = "default"
@@ -207,8 +345,15 @@ class ClusterConfig:
     reconnect_interval_seconds: float = 3.0
     auto_sync_on_join: bool = True
     security: SecurityConfig = field(default_factory=SecurityConfig)
+    tls: TLSConfig = field(default_factory=TLSConfig)
+    acl: ACLConfig = field(default_factory=ACLConfig)
     replication: ReplicationConfig = field(default_factory=ReplicationConfig)
     persistence: PersistenceConfig = field(default_factory=PersistenceConfig)
+    wal: WriteAheadLogConfig = field(default_factory=WriteAheadLogConfig)
+    consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
+    consistency: ConsistencyConfig = field(default_factory=ConsistencyConfig)
+    observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    upgrade: UpgradeConfig = field(default_factory=UpgradeConfig)
 
     def __post_init__(self) -> None:
         """Validate configuration values that affect runtime safety."""
@@ -231,10 +376,43 @@ class ClusterConfig:
             )
         if self.replication.member_failure_threshold <= 0:
             raise ValueError("ReplicationConfig.member_failure_threshold must be >= 1.")
+        if self.replication.queue_maxsize <= 0:
+            raise ValueError("ReplicationConfig.queue_maxsize must be >= 1.")
+        if self.replication.enqueue_timeout_seconds < 0:
+            raise ValueError("ReplicationConfig.enqueue_timeout_seconds must be >= 0.")
+        if self.replication.batch_size <= 0:
+            raise ValueError("ReplicationConfig.batch_size must be >= 1.")
 
         token = self.security.shared_token
         if token is not None and not token.strip():
             raise ValueError("SecurityConfig.shared_token cannot be blank when provided.")
+        if self.consistency.write_timeout_seconds <= 0:
+            raise ValueError("ConsistencyConfig.write_timeout_seconds must be > 0.")
+        if self.consensus.election_timeout_seconds <= 0:
+            raise ValueError("ConsensusConfig.election_timeout_seconds must be > 0.")
+        if self.consensus.heartbeat_interval_seconds <= 0:
+            raise ValueError("ConsensusConfig.heartbeat_interval_seconds must be > 0.")
+        if self.consensus.leader_lease_seconds <= 0:
+            raise ValueError("ConsensusConfig.leader_lease_seconds must be > 0.")
+        if self.wal.checkpoint_interval_operations <= 0:
+            raise ValueError("WriteAheadLogConfig.checkpoint_interval_operations must be >= 1.")
+        if self.upgrade.min_compatible_protocol_version <= 0:
+            raise ValueError("UpgradeConfig.min_compatible_protocol_version must be >= 1.")
+        if (
+            self.upgrade.max_compatible_protocol_version
+            < self.upgrade.min_compatible_protocol_version
+        ):
+            raise ValueError(
+                "UpgradeConfig.max_compatible_protocol_version must be >= min_compatible_protocol_version."
+            )
+        if self.observability.trace_history_size <= 0:
+            raise ValueError("ObservabilityConfig.trace_history_size must be >= 1.")
+        if self.tls.enabled and not self.tls.certfile:
+            raise ValueError("TLSConfig.certfile is required when TLS is enabled.")
+        if self.tls.enabled and not self.tls.keyfile:
+            raise ValueError("TLSConfig.keyfile is required when TLS is enabled.")
+        if self.tls.require_client_cert and not self.tls.ca_file:
+            raise ValueError("TLSConfig.ca_file is required when require_client_cert is true.")
 
     @property
     def advertise_address(self) -> NodeAddress:

@@ -9,12 +9,14 @@ The transport module provides two focused primitives:
 Protocol framing and JSON encoding are delegated to :mod:`protocol`.
 Outbound request/response calls also enforce protocol-version compatibility and
 optional shared-token authentication.
+When configured, both server and client sockets are wrapped with TLS.
 """
 
 from __future__ import annotations
 
 import socket
 import socketserver
+import ssl
 import threading
 from typing import Any, Callable
 
@@ -42,21 +44,27 @@ class _ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         server_address: tuple[str, int],
         handler_cls: type[socketserver.BaseRequestHandler],
         message_handler: MessageHandler,
+        ssl_context: ssl.SSLContext | None = None,
     ) -> None:
         super().__init__(server_address, handler_cls)
         self.message_handler = message_handler
+        self.ssl_context = ssl_context
 
 
 class _ClusterRequestHandler(socketserver.BaseRequestHandler):
     """Handle one inbound framed message and send one response."""
 
     def handle(self) -> None:
-        sock = self.request
-        if not isinstance(sock, socket.socket):
+        raw_sock = self.request
+        if not isinstance(raw_sock, socket.socket):
             return
         response: dict[str, Any]
+        active_sock: socket.socket | ssl.SSLSocket = raw_sock
+        ssl_context = getattr(self.server, "ssl_context", None)  # type: ignore[attr-defined]
         try:
-            incoming = recv_frame(sock)
+            if ssl_context is not None:
+                active_sock = ssl_context.wrap_socket(raw_sock, server_side=True)
+            incoming = recv_frame(active_sock)
             response = self.server.message_handler(incoming)  # type: ignore[attr-defined]
         except Exception as exc:  # noqa: BLE001 - transport must not crash the server loop
             response = {
@@ -65,7 +73,7 @@ class _ClusterRequestHandler(socketserver.BaseRequestHandler):
                 "protocol_version": PROTOCOL_VERSION,
                 "payload": {"reason": str(exc)},
             }
-        send_frame(sock, response)
+        send_frame(active_sock, response)
 
 
 class TcpTransportServer:
@@ -81,9 +89,16 @@ class TcpTransportServer:
         response dictionary to be sent back to the client.
     """
 
-    def __init__(self, *, bind: NodeAddress, message_handler: MessageHandler) -> None:
+    def __init__(
+        self,
+        *,
+        bind: NodeAddress,
+        message_handler: MessageHandler,
+        ssl_context: ssl.SSLContext | None = None,
+    ) -> None:
         self._bind = bind
         self._message_handler = message_handler
+        self._ssl_context = ssl_context
         self._server: _ThreadedTCPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -95,6 +110,7 @@ class TcpTransportServer:
             (self._bind.host, self._bind.port),
             _ClusterRequestHandler,
             self._message_handler,
+            self._ssl_context,
         )
         self._thread = threading.Thread(
             target=self._server.serve_forever,
@@ -122,6 +138,10 @@ def request_response(
     timeout_seconds: float,
     *,
     security_token: str | None = None,
+    ssl_context: ssl.SSLContext | None = None,
+    server_hostname: str | None = None,
+    min_protocol_version: int = PROTOCOL_VERSION,
+    max_protocol_version: int = PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     """
     Send one TCP request to a peer and wait for one response.
@@ -136,11 +156,30 @@ def request_response(
         Socket timeout applied to connect/send/receive steps.
     security_token:
         Optional shared token for HMAC message authentication.
+    ssl_context:
+        Optional client SSL context used to wrap TCP connections.
+    server_hostname:
+        Optional SNI/hostname value for TLS certificate validation.
+    min_protocol_version:
+        Minimum accepted peer protocol version.
+    max_protocol_version:
+        Maximum accepted peer protocol version.
     """
-    with socket.create_connection((peer.host, peer.port), timeout=timeout_seconds) as sock:
-        sock.settimeout(timeout_seconds)
-        send_frame(sock, attach_authentication(message, security_token))
-        response = recv_frame(sock)
-        assert_protocol_compatible(response)
+    with socket.create_connection((peer.host, peer.port), timeout=timeout_seconds) as raw_sock:
+        raw_sock.settimeout(timeout_seconds)
+        active_sock: socket.socket | ssl.SSLSocket = raw_sock
+        if ssl_context is not None:
+            active_sock = ssl_context.wrap_socket(
+                raw_sock,
+                server_hostname=server_hostname or peer.host,
+            )
+            active_sock.settimeout(timeout_seconds)
+        send_frame(active_sock, attach_authentication(message, security_token))
+        response = recv_frame(active_sock)
+        assert_protocol_compatible(
+            response,
+            min_supported_version=min_protocol_version,
+            max_supported_version=max_protocol_version,
+        )
         assert_authenticated(response, security_token)
         return response

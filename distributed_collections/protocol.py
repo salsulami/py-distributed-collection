@@ -10,7 +10,8 @@ The protocol intentionally stays simple:
 
    ``{"kind": "...", "cluster": "...", "payload": {...}, "protocol_version": 1}``
 
-5. When configured, envelopes are authenticated with HMAC-SHA256 signatures.
+5. Nodes validate protocol versions against configurable compatibility ranges.
+6. When configured, envelopes are authenticated with HMAC-SHA256 signatures.
 
 This design keeps interoperability straightforward and makes on-wire traffic
 easy to inspect during debugging.
@@ -48,6 +49,20 @@ class MessageKind(str, Enum):
         Snapshot response carrying full map/list/queue state.
     OPERATION
         Replicated collection mutation (map/list/queue/topic).
+    OPERATION_BATCH
+        Batched replicated mutations packed in one frame.
+    FORWARD_OPERATION
+        Follower write-forward request sent to leader.
+    FORWARD_OPERATION_RESULT
+        Leader response for forwarded write.
+    VOTE_REQUEST
+        Leader-election vote request.
+    VOTE_RESPONSE
+        Leader-election vote response.
+    HEARTBEAT
+        Leader liveness heartbeat for failure detection.
+    HEARTBEAT_ACK
+        Follower heartbeat acknowledgement.
     ERROR
         Error response for malformed or invalid requests.
     """
@@ -57,6 +72,13 @@ class MessageKind(str, Enum):
     STATE_REQUEST = "state_request"
     STATE_RESPONSE = "state_response"
     OPERATION = "operation"
+    OPERATION_BATCH = "operation_batch"
+    FORWARD_OPERATION = "forward_operation"
+    FORWARD_OPERATION_RESULT = "forward_operation_result"
+    VOTE_REQUEST = "vote_request"
+    VOTE_RESPONSE = "vote_response"
+    HEARTBEAT = "heartbeat"
+    HEARTBEAT_ACK = "heartbeat_ack"
     ERROR = "error"
 
 
@@ -115,7 +137,12 @@ def verify_authentication(message: dict[str, Any], security_token: str | None) -
     return hmac.compare_digest(given, expected)
 
 
-def assert_protocol_compatible(message: dict[str, Any]) -> None:
+def assert_protocol_compatible(
+    message: dict[str, Any],
+    *,
+    min_supported_version: int = PROTOCOL_VERSION,
+    max_supported_version: int = PROTOCOL_VERSION,
+) -> None:
     """
     Raise if message protocol version is not supported.
 
@@ -125,9 +152,12 @@ def assert_protocol_compatible(message: dict[str, Any]) -> None:
         Decoded message envelope.
     """
     version = message.get("protocol_version")
-    if version != PROTOCOL_VERSION:
+    if not isinstance(version, int):
+        raise ProtocolVersionError("Message protocol_version must be an integer.")
+    if version < min_supported_version or version > max_supported_version:
         raise ProtocolVersionError(
-            f"Incompatible protocol version {version!r}; expected {PROTOCOL_VERSION!r}."
+            "Incompatible protocol version "
+            f"{version!r}; supported range is [{min_supported_version!r}, {max_supported_version!r}]."
         )
 
 

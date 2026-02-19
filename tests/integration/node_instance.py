@@ -39,8 +39,12 @@ if str(REPO_ROOT) not in sys.path:
 from distributed_collections import (  # noqa: E402
     ClusterConfig,
     ClusterNode,
+    ConsistencyConfig,
+    ConsistencyMode,
     DiscoveryMode,
     NodeAddress,
+    ObservabilityConfig,
+    SecurityConfig,
     StaticDiscoveryConfig,
 )
 
@@ -90,6 +94,23 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("static", "multicast", "both"),
         help="Discovery strategy for this process",
     )
+    parser.add_argument(
+        "--shared-token",
+        default="",
+        help="Optional shared token for HMAC message authentication",
+    )
+    parser.add_argument(
+        "--consistency",
+        default="linearizable",
+        choices=("best_effort", "quorum", "all", "linearizable"),
+        help="Write consistency mode",
+    )
+    parser.add_argument(
+        "--observability-port",
+        type=int,
+        default=0,
+        help="Optional HTTP observability endpoint port; disabled when 0",
+    )
     return parser
 
 
@@ -130,6 +151,10 @@ def handle_command(
         return True, [member.as_dict() for member in node.members()]
     if cmd == "stats":
         return True, node.stats()
+    if cmd == "health":
+        return True, node.health()
+    if cmd == "traces":
+        return True, node.recent_traces()
 
     if cmd == "map_put":
         target = node.get_map(str(command["name"]))
@@ -195,6 +220,13 @@ def run() -> int:
             advertise_host=args.host,
             static_discovery=StaticDiscoveryConfig(seeds=seeds),
             enabled_discovery=selected_discovery_modes(args.discovery),
+            security=SecurityConfig(shared_token=args.shared_token or None),
+            consistency=ConsistencyConfig(mode=ConsistencyMode(args.consistency)),
+            observability=ObservabilityConfig(
+                enable_http=args.observability_port > 0,
+                host=args.host,
+                port=args.observability_port if args.observability_port > 0 else 8085,
+            ),
         )
         node = ClusterNode(config)
         node.start(join=True)

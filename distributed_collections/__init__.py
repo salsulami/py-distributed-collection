@@ -19,9 +19,16 @@ compact length-prefixed JSON protocol on TCP.
 Production hardening features include:
 
 * optional shared-token HMAC authentication for all TCP messages
+* optional TLS/mTLS transport encryption
+* sender-based ACL enforcement for remote operations
+* leader election + heartbeat failure detection + split-brain protection lease
+* quorum/all/linearizable write consistency options
 * asynchronous replication workers with retry/backoff and member eviction
+* write-ahead log replay and checkpointed snapshot durability lifecycle
 * optional on-disk snapshot persistence for restart recovery
 * runtime counters via :meth:`distributed_collections.cluster.ClusterNode.stats`
+* optional HTTP health/metrics/traces observability endpoint
+* rolling-upgrade protocol compatibility ranges
 
 Typical usage::
 
@@ -44,14 +51,22 @@ Typical usage::
 
 from .cluster import ClusterNode
 from .config import (
+    ACLConfig,
     ClusterConfig,
+    ConsensusConfig,
+    ConsistencyConfig,
+    ConsistencyMode,
     DiscoveryMode,
     MulticastDiscoveryConfig,
     NodeAddress,
+    ObservabilityConfig,
     PersistenceConfig,
     ReplicationConfig,
     SecurityConfig,
     StaticDiscoveryConfig,
+    TLSConfig,
+    UpgradeConfig,
+    WriteAheadLogConfig,
 )
 from .primitives import (
     DistributedList,
@@ -63,6 +78,10 @@ from .primitives import (
 __all__ = [
     "ClusterConfig",
     "ClusterNode",
+    "ACLConfig",
+    "ConsensusConfig",
+    "ConsistencyConfig",
+    "ConsistencyMode",
     "DiscoveryMode",
     "DistributedList",
     "DistributedMap",
@@ -70,8 +89,12 @@ __all__ = [
     "DistributedTopic",
     "MulticastDiscoveryConfig",
     "NodeAddress",
+    "ObservabilityConfig",
     "PersistenceConfig",
     "ReplicationConfig",
     "SecurityConfig",
     "StaticDiscoveryConfig",
+    "TLSConfig",
+    "UpgradeConfig",
+    "WriteAheadLogConfig",
 ]

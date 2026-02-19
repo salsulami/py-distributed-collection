@@ -118,6 +118,29 @@ def send_command(
     return response.get("result")
 
 
+def send_eventually(
+    proc: subprocess.Popen[str],
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 8.0,
+    interval_seconds: float = 0.2,
+) -> Any:
+    """
+    Retry a command until it succeeds or timeout is reached.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    last_exc: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return send_command(proc, payload, timeout_seconds=interval_seconds + 1.0)
+        except Exception as exc:  # noqa: BLE001 - preserve final error context
+            last_exc = exc
+            time.sleep(interval_seconds)
+    if last_exc is not None:
+        raise AssertionError(f"Command did not succeed in time: {payload}") from last_exc
+    raise AssertionError(f"Command did not succeed in time: {payload}")
+
+
 def stop_node_process(proc: subprocess.Popen[str]) -> None:
     """
     Stop helper process gracefully and force kill only as a fallback.
@@ -184,10 +207,10 @@ class TwoInstanceReplicationIntegrationTest(unittest.TestCase):
         self.addCleanup(stop_node_process, node_2)
 
         # Force a deterministic join pass on both nodes once both are online.
-        send_command(node_1, {"cmd": "join"})
-        send_command(node_2, {"cmd": "join"})
+        send_eventually(node_1, {"cmd": "join"})
+        send_eventually(node_2, {"cmd": "join"})
 
-        send_command(
+        send_eventually(
             node_1,
             {
                 "cmd": "map_put",
@@ -207,7 +230,7 @@ class TwoInstanceReplicationIntegrationTest(unittest.TestCase):
             message="Map replication from node_1 to node_2 did not converge.",
         )
 
-        send_command(
+        send_eventually(
             node_2,
             {"cmd": "list_append", "name": "events", "value": {"type": "order-created"}},
         )
@@ -219,7 +242,7 @@ class TwoInstanceReplicationIntegrationTest(unittest.TestCase):
             message="List replication from node_2 to node_1 did not converge.",
         )
 
-        send_command(node_1, {"cmd": "queue_offer", "name": "jobs", "value": "job-1"})
+        send_eventually(node_1, {"cmd": "queue_offer", "name": "jobs", "value": "job-1"})
         assert_eventually(
             lambda: send_command(node_2, {"cmd": "queue_values", "name": "jobs"}) == ["job-1"],
             timeout_seconds=8.0,
@@ -235,8 +258,8 @@ class TwoInstanceReplicationIntegrationTest(unittest.TestCase):
             message="Queue poll mutation did not replicate back to node_1.",
         )
 
-        send_command(node_2, {"cmd": "topic_subscribe", "name": "alerts"})
-        send_command(
+        send_eventually(node_2, {"cmd": "topic_subscribe", "name": "alerts"})
+        send_eventually(
             node_1,
             {
                 "cmd": "topic_publish",

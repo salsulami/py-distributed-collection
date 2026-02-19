@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distributed-python-collections"
+version = "0.1.0"
+description = "Hazelcast-inspired distributed collections for Python services."
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+  { name = "Distributed Collections Team" }
+]
+keywords = ["distributed-systems", "collections", "tcp", "cluster", "hazelcast"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Topic :: System :: Distributed Computing",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["distributed_collections*"]

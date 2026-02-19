@@ -30,6 +30,11 @@ Production hardening features include:
 * optional HTTP health/metrics/traces observability endpoint
 * rolling-upgrade protocol compatibility ranges
 
+Redis-backed implementation is available as a separate plugin package:
+
+* project: ``distributed-python-collections-redis``
+* import path: ``distributed_collections_redis``
+
 Typical usage::
 
     from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
@@ -74,6 +79,8 @@ from .primitives import (
     DistributedQueue,
     DistributedTopic,
 )
+from .store import ClusterDataStore
+from .store_protocol import CollectionStore
 
 __all__ = [
     "ClusterConfig",
@@ -87,6 +94,8 @@ __all__ = [
     "DistributedMap",
     "DistributedQueue",
     "DistributedTopic",
+    "ClusterDataStore",
+    "CollectionStore",
     "MulticastDiscoveryConfig",
     "NodeAddress",
     "ObservabilityConfig",

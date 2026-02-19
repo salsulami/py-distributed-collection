@@ -51,6 +51,7 @@ from .protocol import (
     make_message,
 )
 from .store import ClusterDataStore
+from .store_protocol import CollectionStore
 from .transport import TcpTransportServer, request_response
 from .wal import WriteAheadLog
 
@@ -65,13 +66,21 @@ class ClusterNode:
     orchestration for distributed map/list/queue/topic primitives.
     """
 
-    def __init__(self, config: ClusterConfig) -> None:
+    def __init__(self, config: ClusterConfig, *, store: CollectionStore | None = None) -> None:
         """
         Initialize runtime state from :class:`ClusterConfig`.
+
+        Parameters
+        ----------
+        config:
+            Cluster runtime configuration.
+        store:
+            Optional external collection-store backend implementation. When not
+            provided, the default in-memory :class:`ClusterDataStore` is used.
         """
         self.config = config
         self.node_id = uuid.uuid4().hex
-        self._store = ClusterDataStore()
+        self._store: CollectionStore = store if store is not None else ClusterDataStore()
 
         # Membership state
         self._members: set[NodeAddress] = set()

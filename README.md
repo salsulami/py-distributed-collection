@@ -1,5 +1,12 @@
 # distributed-python-collections
 
+[![Last commit](https://img.shields.io/github/last-commit/salsulami/py-distributed-collection)](https://github.com/salsulami/py-distributed-collection/commits)
+[![Publish packages](https://github.com/salsulami/py-distributed-collection/actions/workflows/publish.yml/badge.svg)](https://github.com/salsulami/py-distributed-collection/actions/workflows/publish.yml)
+[![PyPI core](https://img.shields.io/pypi/v/distributed-python-collections)](https://pypi.org/project/distributed-python-collections/)
+[![PyPI core status](https://img.shields.io/pypi/status/distributed-python-collections)](https://pypi.org/project/distributed-python-collections/)
+[![PyPI core Python](https://img.shields.io/pypi/pyversions/distributed-python-collections)](https://pypi.org/project/distributed-python-collections/)
+[![PyPI redis plugin](https://img.shields.io/pypi/v/distributed-python-collections-redis)](https://pypi.org/project/distributed-python-collections-redis/)
+
 Hazelcast-inspired distributed collections for Python services, with support for:
 
 - distributed `map`, `list`, `queue`, and `topic`

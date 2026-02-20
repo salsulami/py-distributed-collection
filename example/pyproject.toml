@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distributed-python-collections-example"
+version = "0.1.4"
+description = "Installable example project for distributed-python-collections."
+requires-python = ">=3.10"
+dependencies = [
+  "distributed-python-collections>=0.1.4",
+]
+
+[project.optional-dependencies]
+redis = [
+  "distributed-python-collections-redis>=0.1.4",
+]
+
+[project.scripts]
+dpc-example = "dpc_example.demo:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dpc_example*"]

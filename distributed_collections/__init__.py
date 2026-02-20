@@ -11,6 +11,7 @@ applications where collection state is replicated over TCP:
 * :class:`distributed_collections.primitives.DistributedList`
 * :class:`distributed_collections.primitives.DistributedQueue`
 * :class:`distributed_collections.primitives.DistributedTopic`
+* :class:`distributed_collections.primitives.DistributedLock`
 
 Discovery supports both static seed peers and multicast peer discovery.
 Nodes exchange membership metadata and operation replication messages using a
@@ -73,6 +74,7 @@ from .backends import StoreBackend, available_backends, create_node, create_stor
 from .config import (
     ACLConfig,
     ClusterConfig,
+    CPSubsystemConfig,
     ConsensusConfig,
     ConsistencyConfig,
     ConsistencyMode,
@@ -90,6 +92,7 @@ from .config import (
 )
 from .primitives import (
     DistributedList,
+    DistributedLock,
     DistributedMap,
     DistributedQueue,
     DistributedTopic,
@@ -106,10 +109,12 @@ __all__ = [
     "create_store",
     "ACLConfig",
     "ConsensusConfig",
+    "CPSubsystemConfig",
     "ConsistencyConfig",
     "ConsistencyMode",
     "DiscoveryMode",
     "DistributedList",
+    "DistributedLock",
     "DistributedMap",
     "DistributedQueue",
     "DistributedTopic",

@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "distributed-python-collections-redis"
-version = "0.1.0"
+version = "0.1.4"
 description = "Redis backend plugin for distributed-python-collections."
 requires-python = ">=3.10"
 authors = [
   { name = "Distributed Collections Team" }
 ]
 dependencies = [
-  "distributed-python-collections>=0.1.0",
+  "distributed-python-collections>=0.1.4",
   "redis",
 ]
 keywords = ["redis", "distributed-systems", "collections", "plugin"]

@@ -8,6 +8,7 @@ which performs replication to other nodes.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Iterator, MutableMapping
 from typing import TYPE_CHECKING, Any
 
@@ -235,3 +236,115 @@ class DistributedTopic:
     def publish(self, message: Any) -> None:
         """Publish a message to subscribers on all connected nodes."""
         self._cluster._topic_publish(self._name, message)
+
+
+class DistributedLock:
+    """
+    CP-backed distributed lock with lease and fencing-token semantics.
+
+    The lock is coordinated via the cluster CP subsystem and committed through
+    the same ordered replication path as other linearizable operations.
+    """
+
+    def __init__(self, cluster: "ClusterNode", name: str) -> None:
+        self._cluster = cluster
+        self._name = name
+        self._owner_id = uuid.uuid4().hex
+        self._token: str | None = None
+        self._fencing_token: int | None = None
+
+    @property
+    def name(self) -> str:
+        """Return the logical lock name."""
+        return self._name
+
+    @property
+    def fencing_token(self) -> int | None:
+        """
+        Return the latest fencing token acquired by this handle.
+
+        The token is monotonic per lock name and useful for fencing external
+        side-effects when lock ownership changes.
+        """
+        return self._fencing_token
+
+    def acquire(
+        self,
+        *,
+        blocking: bool = True,
+        timeout_seconds: float | None = None,
+        lease_seconds: float | None = None,
+    ) -> bool:
+        """
+        Attempt to acquire the distributed lock.
+
+        Parameters
+        ----------
+        blocking:
+            When true, retry until acquired or timeout.
+        timeout_seconds:
+            Maximum wait duration when ``blocking`` is true.
+        lease_seconds:
+            Lock lease duration; defaults to CP subsystem configuration.
+        """
+        result = self._cluster._cp_lock_acquire(
+            self._name,
+            owner_id=self._owner_id,
+            blocking=blocking,
+            timeout_seconds=timeout_seconds,
+            lease_seconds=lease_seconds,
+            current_token=self._token,
+        )
+        if not result.get("acquired", False):
+            return False
+        self._token = str(result["token"])
+        self._fencing_token = int(result["fencing_token"])
+        return True
+
+    def try_acquire(self, *, lease_seconds: float | None = None) -> bool:
+        """Try to acquire lock once without blocking."""
+        return self.acquire(blocking=False, lease_seconds=lease_seconds)
+
+    def refresh(self, *, lease_seconds: float | None = None) -> bool:
+        """
+        Extend lease for the lock currently owned by this handle.
+        """
+        if self._token is None:
+            return False
+        return self._cluster._cp_lock_refresh(
+            self._name,
+            owner_id=self._owner_id,
+            token=self._token,
+            lease_seconds=lease_seconds,
+        )
+
+    def release(self) -> bool:
+        """Release lock ownership for this handle."""
+        if self._token is None:
+            return False
+        released = self._cluster._cp_lock_release(
+            self._name,
+            owner_id=self._owner_id,
+            token=self._token,
+        )
+        if released:
+            self._token = None
+            self._fencing_token = None
+        return released
+
+    def is_locked(self) -> bool:
+        """Return ``True`` when the lock is currently owned by any session."""
+        return self._cluster._cp_lock_is_locked(self._name)
+
+    def owner(self) -> str | None:
+        """Return current owner session ID, or ``None`` when lock is free."""
+        return self._cluster._cp_lock_owner(self._name)
+
+    def __enter__(self) -> "DistributedLock":
+        if not self.acquire(blocking=True):
+            raise TimeoutError(f"Failed to acquire distributed lock {self._name!r}.")
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+        self.release()
+        return False

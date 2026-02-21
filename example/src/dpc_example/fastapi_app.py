@@ -25,6 +25,7 @@ from distributed_collections import (
     StaticDiscoveryConfig,
     create_node,
 )
+from distributed_collections.exceptions import ClusterNotRunningError
 from fastapi import FastAPI, HTTPException
 
 app = FastAPI(title="distributed-python-collections FastAPI example", version="0.1.0")
@@ -37,6 +38,10 @@ _TOPIC_HISTORY_SIZE = 200
 
 _node: ClusterNode | None = None
 _PORT_SCAN_LIMIT = 200
+_STATIC_SEED_DEFAULT_BASE_PORT = 5711
+_STATIC_SEED_DEFAULT_COUNT = 16
+_join_retry_thread: threading.Thread | None = None
+_join_retry_stop = threading.Event()
 
 
 def _get_env(name: str, default: str) -> str:
@@ -101,6 +106,40 @@ def _parse_seeds(raw_seeds: str) -> list[NodeAddress]:
     return seeds
 
 
+def _default_seed_hosts(bind_host: str, advertise_host: str | None) -> list[str]:
+    candidates: list[str] = []
+    for item in (bind_host, advertise_host or "", os.getenv("POD_IP", "").strip(), "127.0.0.1"):
+        host = str(item).strip()
+        if not host or host in {"0.0.0.0", "::"}:
+            continue
+        if host not in candidates:
+            candidates.append(host)
+    return candidates or ["127.0.0.1"]
+
+
+def _build_default_static_seeds(
+    *,
+    bind_host: str,
+    advertise_host: str | None,
+    bind_port: int,
+    base_port: int,
+    count: int,
+) -> list[NodeAddress]:
+    seeds: list[NodeAddress] = []
+    for host in _default_seed_hosts(bind_host, advertise_host):
+        for offset in range(max(1, count)):
+            port = base_port + offset
+            if port < 1 or port > 65535:
+                continue
+            # Avoid connecting to this same process via alternative host aliases.
+            if port == bind_port:
+                continue
+            candidate = NodeAddress(host=host, port=port)
+            if candidate not in seeds:
+                seeds.append(candidate)
+    return seeds
+
+
 def _build_cluster_config() -> ClusterConfig:
     bind_host = _get_env("DPC_BIND_HOST", "0.0.0.0")
     bind_port_env = _get_env_optional("DPC_BIND_PORT")
@@ -108,7 +147,7 @@ def _build_cluster_config() -> ClusterConfig:
     cluster_name = _get_env("DPC_CLUSTER_NAME", "dpc-fastapi-example")
     advertise_host = _get_env_optional("DPC_ADVERTISE_HOST")
     consistency_name = _get_env("DPC_CONSISTENCY", "best_effort")
-    discovery_name = _get_env("DPC_DISCOVERY", "multicast").lower()
+    discovery_name = _get_env("DPC_DISCOVERY", "both").lower()
     static_seeds = _parse_seeds(_get_env_optional("DPC_STATIC_SEEDS") or "")
 
     config_kwargs: dict[str, Any] = {
@@ -130,9 +169,18 @@ def _build_cluster_config() -> ClusterConfig:
         bind_port = chosen_bind_port
         config_kwargs["bind"] = NodeAddress(bind_host, bind_port)
 
+    if discovery_name in {"static", "both"} and not static_seeds:
+        seed_base_port = _parse_int("DPC_STATIC_SEED_BASE_PORT", _STATIC_SEED_DEFAULT_BASE_PORT)
+        seed_count = _parse_int("DPC_STATIC_SEED_COUNT", _STATIC_SEED_DEFAULT_COUNT)
+        static_seeds = _build_default_static_seeds(
+            bind_host=bind_host,
+            advertise_host=advertise_host,
+            bind_port=bind_port,
+            base_port=seed_base_port,
+            count=seed_count,
+        )
+
     if discovery_name == "static":
-        if not static_seeds:
-            raise RuntimeError("DPC_DISCOVERY=static requires DPC_STATIC_SEEDS.")
         config_kwargs["enabled_discovery"] = (DiscoveryMode.STATIC,)
         config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
     elif discovery_name == "both":
@@ -167,6 +215,21 @@ def _require_node() -> ClusterNode:
     return _node
 
 
+def _join_retry_loop() -> None:
+    while not _join_retry_stop.is_set():
+        node = _node
+        if node is None:
+            return
+        try:
+            node.join_cluster()
+        except ClusterNotRunningError:
+            return
+        except Exception:
+            pass
+        wait_seconds = max(0.5, float(node.config.reconnect_interval_seconds))
+        _join_retry_stop.wait(wait_seconds)
+
+
 def _record_topic_message(topic_name: str, message: Any) -> None:
     with _topic_lock:
         history = _topic_messages.setdefault(topic_name, deque(maxlen=_TOPIC_HISTORY_SIZE))
@@ -187,16 +250,27 @@ def _ensure_topic_subscription(topic_name: str) -> None:
 
 @app.on_event("startup")
 def on_startup() -> None:
-    global _node
+    global _node, _join_retry_thread
     if _node is not None:
         return
     _node = _build_cluster_node()
     _node.start(join=True)
+    _join_retry_stop.clear()
+    _join_retry_thread = threading.Thread(
+        target=_join_retry_loop,
+        name="dpc-example-join-retry",
+        daemon=True,
+    )
+    _join_retry_thread.start()
 
 
 @app.on_event("shutdown")
 def on_shutdown() -> None:
-    global _node
+    global _node, _join_retry_thread
+    _join_retry_stop.set()
+    if _join_retry_thread is not None:
+        _join_retry_thread.join(timeout=1.0)
+        _join_retry_thread = None
     node = _node
     if node is None:
         return
@@ -343,10 +417,11 @@ def topic_messages(name: str) -> dict[str, Any]:
     return {"messages": values}
 
 
-def main(port:int) -> int:
+def main(port: int | None = None) -> int:
     host = _get_env("DPC_API_HOST", "0.0.0.0")
     api_port_env = _get_env_optional("DPC_API_PORT")
-    port = _parse_int("DPC_API_PORT", port)
+    default_port = 8000 if port is None else int(port)
+    port = _parse_int("DPC_API_PORT", default_port)
     if api_port_env is None:
         chosen_api_port = _find_first_available_port(host, port)
         if chosen_api_port != port:

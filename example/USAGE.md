@@ -11,6 +11,12 @@ pip install -e .
 pip install -e example
 ```
 
+Or install FastAPI example dependencies directly:
+
+```bash
+pip install -r example/requirements.txt
+```
+
 Optional Redis backend:
 
 ```bash
@@ -52,6 +58,17 @@ Install example package:
 ```bash
 pip install -e example
 ```
+
+Notes:
+
+- If `DPC_API_PORT` is unset, the app auto-selects the first free API port starting from `8000`.
+- If `DPC_BIND_PORT` is unset, the app auto-selects the first free cluster TCP port starting from `5711`.
+- Default `DPC_DISCOVERY` is `both` (multicast + static fallback), using node IP for multicast identity.
+- If `DPC_STATIC_SEEDS` is unset, default local fallback seeds are generated from ports `5711..5726`.
+- App retries `join_cluster()` periodically so late-starting nodes can still be discovered.
+- For deterministic static discovery, set `DPC_DISCOVERY=static` and provide explicit `DPC_STATIC_SEEDS`.
+- Example defaults disable persistence/WAL for memory backend, so process restarts start from empty state.
+- If you use Redis backend, data durability depends on Redis and is not process-ephemeral.
 
 Start instance A (terminal 1):
 

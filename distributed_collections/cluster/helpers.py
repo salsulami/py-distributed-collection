@@ -82,3 +82,21 @@ class ClusterHelperMixin:
                 expired = self._seen_operation_order.popleft()
                 self._seen_operation_ids.discard(expired)
             return True
+
+    def _cluster_members_log_view(self) -> tuple[str, int]:
+        """
+        Build one-line cluster-member snapshot for logs.
+
+        Returns a tuple of ``([ip(port),...], total_members)`` where total includes
+        the local node.
+        """
+        with self._members_lock:
+            remote_members = sorted(self._members, key=lambda item: (item.host, item.port))
+        local = self.config.advertise_address
+        members = [local]
+        members.extend(member for member in remote_members if member != local)
+        formatted = ",".join(
+            f"{member.host}({member.port})(this)" if member == local else f"{member.host}({member.port})"
+            for member in members
+        )
+        return f"[{formatted}]", len(members)

@@ -12,7 +12,9 @@ attempt TCP handshakes with the union of addresses.
 
 from __future__ import annotations
 
+import errno
 import json
+import logging
 import os
 import socket
 import struct
@@ -24,6 +26,7 @@ from .config import ClusterConfig, NodeAddress, _detect_current_node_address
 
 _DISCOVER = "discover"
 _DISCOVER_REPLY = "discover_reply"
+_LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_ipv4_host(host: str) -> str | None:
@@ -62,7 +65,19 @@ def _current_multicast_interface_ip(bind_host: str, advertise_host: str) -> str:
     for candidate in candidates:
         resolved = _resolve_ipv4_host(candidate)
         if resolved and resolved != "0.0.0.0":
+            _LOGGER.debug(
+                "Selected multicast interface address=%s from candidate=%s bind_host=%s advertise_host=%s",
+                resolved,
+                candidate,
+                bind_host,
+                advertise_host,
+            )
             return resolved
+    _LOGGER.debug(
+        "Falling back multicast interface to wildcard bind_host=%s advertise_host=%s",
+        bind_host,
+        advertise_host,
+    )
     return "0.0.0.0"
 
 
@@ -75,7 +90,13 @@ def discover_static_peers(config: ClusterConfig) -> list[NodeAddress]:
     config:
         Cluster configuration holding seed addresses.
     """
-    return config.normalized_static_seeds()
+    peers = config.normalized_static_seeds()
+    _LOGGER.debug(
+        "Static discovery resolved peers=%s count=%d",
+        [(peer.host, peer.port) for peer in peers],
+        len(peers),
+    )
+    return peers
 
 
 class MulticastDiscoveryResponder:
@@ -112,6 +133,7 @@ class MulticastDiscoveryResponder:
     def start(self) -> None:
         """Start the background listener thread if not already running."""
         if self._thread and self._thread.is_alive():
+            _LOGGER.debug("Multicast responder already running node_id=%s", self._node_id)
             return
         self._stop.clear()
         self._thread = threading.Thread(
@@ -120,40 +142,153 @@ class MulticastDiscoveryResponder:
             daemon=True,
         )
         self._thread.start()
+        _LOGGER.debug(
+            "Multicast responder started cluster=%s node_id=%s group=%s port=%d",
+            self._cluster_name,
+            self._node_id,
+            self._group,
+            self._port,
+        )
 
     def stop(self) -> None:
         """Signal thread shutdown and wait briefly for completion."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=1.0)
+        _LOGGER.debug("Multicast responder stopped node_id=%s", self._node_id)
 
-    def _run(self) -> None:
+    def _resolve_reply_address(self) -> NodeAddress:
+        """
+        Resolve advertised address used in discovery replies.
+
+        When auto-advertise behavior is enabled, prefer the currently assigned
+        node interface IP to mirror Hazelcast-style multicast identity.
+        """
+        if not self._prefer_current_assigned_ip:
+            _LOGGER.debug(
+                "Using configured advertise address for discovery reply host=%s port=%d",
+                self._advertise.host,
+                self._advertise.port,
+            )
+            return self._advertise
+        detected = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
+        if detected == "0.0.0.0":
+            detected = _detect_current_node_address(self._bind_host)
+        try:
+            resolved = NodeAddress(host=detected, port=self._advertise.port)
+            _LOGGER.debug(
+                "Resolved dynamic discovery reply address host=%s port=%d",
+                resolved.host,
+                resolved.port,
+            )
+            return resolved
+        except ValueError:
+            _LOGGER.debug(
+                "Dynamic discovery reply address invalid, falling back to advertise host=%s port=%d",
+                self._advertise.host,
+                self._advertise.port,
+            )
+            return self._advertise
+
+    def _open_receiver_socket(self, interface_ip: str) -> socket.socket | None:
+        """
+        Open and configure multicast receiver socket.
+
+        Returns ``None`` when receiver cannot be started, allowing caller to
+        degrade gracefully instead of failing node startup.
+        """
+        _LOGGER.debug(
+            "Opening multicast receiver socket group=%s port=%d interface_ip=%s",
+            self._group,
+            self._port,
+            interface_ip,
+        )
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
-            interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", self._port))
             try:
-                if interface_ip != "0.0.0.0":
-                    sock.setsockopt(
-                        socket.IPPROTO_IP,
-                        socket.IP_MULTICAST_IF,
-                        socket.inet_aton(interface_ip),
-                    )
+                if hasattr(socket, "SO_REUSEPORT"):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError:
                 pass
-            membership_interface = interface_ip if interface_ip != "0.0.0.0" else "0.0.0.0"
-            membership = struct.pack(
-                "4s4s",
-                socket.inet_aton(self._group),
-                socket.inet_aton(membership_interface),
-            )
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-            sock.settimeout(self._socket_timeout_seconds)
 
+            try:
+                sock.bind(("", self._port))
+            except OSError as exc:
+                if exc.errno in {errno.EADDRINUSE, 48, 98}:
+                    _LOGGER.warning(
+                        "Multicast responder port already in use; skipping responder for this node. "
+                        "port=%s reason=%s",
+                        self._port,
+                        exc,
+                    )
+                    return None
+                raise
+
+            membership_interfaces = [interface_ip]
+            if interface_ip != "0.0.0.0":
+                membership_interfaces.append("0.0.0.0")
+            joined_group = False
+            for membership_interface in membership_interfaces:
+                try:
+                    membership = struct.pack(
+                        "4s4s",
+                        socket.inet_aton(self._group),
+                        socket.inet_aton(membership_interface),
+                    )
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                    joined_group = True
+                    _LOGGER.debug(
+                        "Joined multicast group=%s port=%d interface=%s",
+                        self._group,
+                        self._port,
+                        membership_interface,
+                    )
+                except OSError:
+                    continue
+
+            if not joined_group:
+                _LOGGER.warning(
+                    "Failed to join multicast group; responder disabled. "
+                    "group=%s port=%s interface_ip=%s",
+                    self._group,
+                    self._port,
+                    interface_ip,
+                )
+                return None
+
+            sock.settimeout(self._socket_timeout_seconds)
+            _LOGGER.debug(
+                "Multicast receiver ready group=%s port=%d timeout=%s",
+                self._group,
+                self._port,
+                self._socket_timeout_seconds,
+            )
+            return sock
+        except Exception:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+
+    def _run(self) -> None:
+        interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
+        _LOGGER.debug(
+            "Multicast responder loop starting cluster=%s node_id=%s interface_ip=%s",
+            self._cluster_name,
+            self._node_id,
+            interface_ip,
+        )
+        recv_sock = self._open_receiver_socket(interface_ip)
+        if recv_sock is None:
+            _LOGGER.debug("Multicast responder disabled due to socket setup failure node_id=%s", self._node_id)
+            return
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
             while not self._stop.is_set():
                 try:
-                    payload, sender = sock.recvfrom(65535)
+                    payload, sender = recv_sock.recvfrom(65535)
                 except socket.timeout:
                     continue
                 except OSError:
@@ -169,17 +304,14 @@ class MulticastDiscoveryResponder:
                     continue
                 if message.get("node_id") == self._node_id:
                     continue
+                _LOGGER.debug(
+                    "Received multicast discovery probe from=%s cluster=%s remote_node_id=%s",
+                    sender,
+                    message.get("cluster"),
+                    message.get("node_id"),
+                )
 
-                reply_address = self._advertise
-                if self._prefer_current_assigned_ip:
-                    detected = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
-                    if detected == "0.0.0.0":
-                        detected = _detect_current_node_address(self._bind_host)
-                    try:
-                        reply_address = NodeAddress(host=detected, port=self._advertise.port)
-                    except ValueError:
-                        reply_address = self._advertise
-
+                reply_address = self._resolve_reply_address()
                 reply = {
                     "kind": _DISCOVER_REPLY,
                     "cluster": self._cluster_name,
@@ -188,12 +320,23 @@ class MulticastDiscoveryResponder:
                 }
                 raw = json.dumps(reply, separators=(",", ":"), sort_keys=True).encode("utf-8")
                 try:
-                    sock.sendto(raw, sender)
+                    send_sock.sendto(raw, sender)
+                    _LOGGER.debug(
+                        "Sent multicast discovery reply to=%s host=%s port=%d",
+                        sender,
+                        reply_address.host,
+                        reply_address.port,
+                    )
                 except OSError:
                     continue
         finally:
+            _LOGGER.debug("Multicast responder loop stopping node_id=%s", self._node_id)
             try:
-                sock.close()
+                recv_sock.close()
+            except OSError:
+                pass
+            try:
+                send_sock.close()
             except OSError:
                 pass
 
@@ -239,25 +382,72 @@ def discover_multicast_peers(
     }
     wire = json.dumps(probe, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-    for _ in range(max(1, config.multicast.discovery_attempts)):
+    attempts = max(1, config.multicast.discovery_attempts)
+    _LOGGER.debug(
+        "Starting multicast discovery cluster=%s node_id=%s group=%s port=%d attempts=%d",
+        config.cluster_name,
+        node_id,
+        config.multicast.group,
+        config.multicast.port,
+        attempts,
+    )
+    for attempt in range(attempts):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
             interface_ip = _current_multicast_interface_ip(config.bind.host, probe_address.host)
             ttl = int(config.multicast.ttl)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", ttl))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
-            try:
-                if interface_ip != "0.0.0.0":
-                    sock.setsockopt(
-                        socket.IPPROTO_IP,
-                        socket.IP_MULTICAST_IF,
-                        socket.inet_aton(interface_ip),
-                    )
-            except OSError:
-                pass
+            # Keep multicast loopback enabled so multiple local instances can
+            # discover each other on the same host.
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
             sock.settimeout(socket_timeout_seconds)
 
-            sock.sendto(wire, (config.multicast.group, config.multicast.port))
+            send_interfaces = [interface_ip]
+            if interface_ip != "0.0.0.0":
+                send_interfaces.extend(["0.0.0.0", "127.0.0.1"])
+            deduped_send_interfaces: list[str] = []
+            for candidate in send_interfaces:
+                if candidate not in deduped_send_interfaces:
+                    deduped_send_interfaces.append(candidate)
+            _LOGGER.debug(
+                "Multicast discovery attempt=%d/%d interface_ip=%s send_interfaces=%s",
+                attempt + 1,
+                attempts,
+                interface_ip,
+                deduped_send_interfaces,
+            )
+
+            sent = False
+            last_error: OSError | None = None
+            for send_interface in deduped_send_interfaces:
+                try:
+                    if send_interface != "0.0.0.0":
+                        sock.setsockopt(
+                            socket.IPPROTO_IP,
+                            socket.IP_MULTICAST_IF,
+                            socket.inet_aton(send_interface),
+                        )
+                    sock.sendto(wire, (config.multicast.group, config.multicast.port))
+                    sent = True
+                    _LOGGER.debug(
+                        "Multicast probe sent via interface=%s group=%s port=%d",
+                        send_interface,
+                        config.multicast.group,
+                        config.multicast.port,
+                    )
+                except OSError as exc:
+                    last_error = exc
+                    continue
+            if not sent:
+                _LOGGER.warning(
+                    "Multicast probe send failed; continuing without multicast peers. "
+                    "group=%s port=%s interface_ip=%s reason=%s",
+                    config.multicast.group,
+                    config.multicast.port,
+                    interface_ip,
+                    last_error,
+                )
+                continue
 
             deadline = time.monotonic() + float(config.multicast.timeout_seconds)
             while time.monotonic() < deadline:
@@ -290,13 +480,26 @@ def discover_multicast_peers(
                 if address == config.advertise_address:
                     continue
                 discovered[(address.host, address.port)] = address
+                _LOGGER.debug(
+                    "Discovered multicast peer host=%s port=%d node_id=%s",
+                    address.host,
+                    address.port,
+                    message.get("node_id"),
+                )
         finally:
             try:
                 sock.close()
             except OSError:
                 pass
 
-    return list(discovered.values())
+    peers = list(discovered.values())
+    _LOGGER.debug(
+        "Multicast discovery completed node_id=%s discovered_count=%d peers=%s",
+        node_id,
+        len(peers),
+        [(peer.host, peer.port) for peer in peers],
+    )
+    return peers
 
 
 def merge_discovery_results(groups: Iterable[list[NodeAddress]]) -> list[NodeAddress]:
@@ -308,11 +511,19 @@ def merge_discovery_results(groups: Iterable[list[NodeAddress]]) -> list[NodeAdd
     """
     merged: list[NodeAddress] = []
     seen: set[tuple[str, int]] = set()
+    group_count = 0
     for peers in groups:
+        group_count += 1
         for peer in peers:
             key = (peer.host, peer.port)
             if key in seen:
                 continue
             seen.add(key)
             merged.append(peer)
+    _LOGGER.debug(
+        "Merged discovery results groups=%d merged_count=%d peers=%s",
+        group_count,
+        len(merged),
+        [(peer.host, peer.port) for peer in merged],
+    )
     return merged

@@ -1,0 +1,24 @@
+
+PUT http://127.0.0.1:8000/map/order/ready_driver
+Content-Type: application/json
+
+{
+"value": "Ahmad"
+}
+
+###
+PUT http://127.0.0.1:3000/map/order/ready_driver_2
+Content-Type: application/json
+
+{
+"value": "Khalied"
+}
+
+###
+GET http://127.0.0.1:8000/map/order
+Content-Type: application/json
+
+###
+###
+GET http://127.0.0.1:3000/map/order
+Content-Type: application/json

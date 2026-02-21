@@ -28,7 +28,9 @@ from distributed_collections import (
     ConsistencyMode,
     DiscoveryMode,
     NodeAddress,
+    PersistenceConfig,
     StaticDiscoveryConfig,
+    WriteAheadLogConfig,
     create_node,
 )
 from distributed_collections.exceptions import BackendNotAvailableError
@@ -75,6 +77,9 @@ def _node_config(
         enabled_discovery=(DiscoveryMode.STATIC,),
         static_discovery=StaticDiscoveryConfig(seeds=[NodeAddress(host, peer_port)]),
         consistency=ConsistencyConfig(mode=ConsistencyMode(consistency_mode)),
+        # Keep the demo ephemeral across process restarts.
+        persistence=PersistenceConfig(enabled=False),
+        wal=WriteAheadLogConfig(enabled=False),
     )
 
 

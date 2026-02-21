@@ -92,7 +92,11 @@ class ClusterHelperMixin:
         """
         with self._members_lock:
             remote_members = sorted(self._members, key=lambda item: (item.host, item.port))
-        members = [self.config.advertise_address]
-        members.extend(member for member in remote_members if member != self.config.advertise_address)
-        formatted = ",".join(f"{member.host}({member.port})" for member in members)
+        local = self.config.advertise_address
+        members = [local]
+        members.extend(member for member in remote_members if member != local)
+        formatted = ",".join(
+            f"{member.host}({member.port})(this)" if member == local else f"{member.host}({member.port})"
+            for member in members
+        )
         return f"[{formatted}]", len(members)

@@ -93,9 +93,12 @@ class ClusterMembershipMixin:
             self._member_failures.pop(address, None)
         if is_new_member:
             member_label = node_id if node_id else "unknown"
+            this_node = self.config.advertise_address
             _LOGGER.info(
-                "Member joined cluster: cluster=%s node_id=%s host=%s port=%s remote_members=%d",
+                "Member joined cluster: cluster=%s this=%s(%s)(this) node_id=%s host=%s port=%s remote_members=%d",
                 self.config.cluster_name,
+                this_node.host,
+                this_node.port,
                 member_label,
                 address.host,
                 address.port,

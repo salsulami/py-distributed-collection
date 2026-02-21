@@ -1,0 +1,7 @@
+distributed-python-collections>=0.1.4
+fastapi
+uvicorn
+
+# Optional Redis backend support for the FastAPI example:
+# distributed-python-collections-redis>=0.1.4
+# redis

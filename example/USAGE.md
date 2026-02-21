@@ -11,6 +11,12 @@ pip install -e .
 pip install -e example
 ```
 
+Or install FastAPI example dependencies directly:
+
+```bash
+pip install -r example/requirements.txt
+```
+
 Optional Redis backend:
 
 ```bash

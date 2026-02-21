@@ -6,7 +6,7 @@ settings, then write to one instance and read from another.
 """
 
 from __future__ import annotations
-
+import argparse
 import logging
 import os
 import socket
@@ -343,10 +343,10 @@ def topic_messages(name: str) -> dict[str, Any]:
     return {"messages": values}
 
 
-def main() -> int:
+def main(port:int) -> int:
     host = _get_env("DPC_API_HOST", "0.0.0.0")
     api_port_env = _get_env_optional("DPC_API_PORT")
-    port = _parse_int("DPC_API_PORT", 8000)
+    port = _parse_int("DPC_API_PORT", port)
     if api_port_env is None:
         chosen_api_port = _find_first_available_port(host, port)
         if chosen_api_port != port:
@@ -361,4 +361,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    parser = argparse.ArgumentParser(description="Run a Python script on a specific port.")
+    parser.add_argument("--port", type=int, default=8000, help="The port number to use")
+    args = parser.parse_args()
+    raise SystemExit(main(args.port))

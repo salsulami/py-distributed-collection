@@ -36,9 +36,13 @@ class ClusterLifecycleMixin:
                     cluster_name=self.config.cluster_name,
                     node_id=self.node_id,
                     advertise=self.config.advertise_address,
+                    bind_host=self.config.bind.host,
                     group=self.config.multicast.group,
                     port=self.config.multicast.port,
                     socket_timeout_seconds=self.config.socket_timeout_seconds,
+                    prefer_current_assigned_ip=bool(
+                        getattr(self.config, "_auto_advertise_host", False)
+                    ),
                 )
                 self._discovery_responder.start()
 

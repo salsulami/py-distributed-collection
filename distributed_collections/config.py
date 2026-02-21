@@ -437,6 +437,12 @@ class ClusterConfig:
     cp: CPSubsystemConfig = field(default_factory=CPSubsystemConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     upgrade: UpgradeConfig = field(default_factory=UpgradeConfig)
+    _auto_advertise_host: bool = field(
+        init=False,
+        repr=False,
+        compare=False,
+        default=False,
+    )
 
     def __post_init__(self) -> None:
         """Validate configuration values that affect runtime safety."""
@@ -447,7 +453,9 @@ class ClusterConfig:
             if self.advertise_host is None
             else str(self.advertise_host).strip()
         )
-        if not advertise_host or advertise_host.lower() == "auto":
+        auto_advertise = (not advertise_host) or (advertise_host.lower() == "auto")
+        self._auto_advertise_host = auto_advertise
+        if auto_advertise:
             advertise_host = _detect_current_node_address(self.bind.host)
         self.advertise_host = advertise_host
         if self.socket_timeout_seconds <= 0:

@@ -182,6 +182,7 @@ In Redis mode, all nodes use shared Redis state for `map`/`list`/`queue`.
 ### Discovery defaults
 
 - Default discovery strategy is **multicast**.
+- In multicast mode, when `advertise_host` is auto, discovery probes/replies use the node's current assigned IP by default.
 - If your environment does not support multicast (common in Kubernetes), set static discovery:
 
 ```python

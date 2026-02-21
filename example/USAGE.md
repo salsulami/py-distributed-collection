@@ -63,7 +63,9 @@ Notes:
 
 - If `DPC_API_PORT` is unset, the app auto-selects the first free API port starting from `8000`.
 - If `DPC_BIND_PORT` is unset, the app auto-selects the first free cluster TCP port starting from `5711`.
-- For static discovery, keep explicit bind ports and matching `DPC_STATIC_SEEDS` as shown below.
+- Default `DPC_DISCOVERY` is `both` (multicast + static fallback).
+- If `DPC_STATIC_SEEDS` is not set, the app auto-builds localhost static seeds from ports `5711..5718`.
+- For deterministic static discovery, keep explicit bind ports and matching `DPC_STATIC_SEEDS` as shown below.
 
 Start instance A (terminal 1):
 

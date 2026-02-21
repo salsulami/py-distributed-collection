@@ -37,6 +37,8 @@ _TOPIC_HISTORY_SIZE = 200
 
 _node: ClusterNode | None = None
 _PORT_SCAN_LIMIT = 200
+_DEFAULT_STATIC_SEED_BASE_PORT = 5711
+_DEFAULT_STATIC_SEED_COUNT = 8
 
 
 def _get_env(name: str, default: str) -> str:
@@ -101,6 +103,32 @@ def _parse_seeds(raw_seeds: str) -> list[NodeAddress]:
     return seeds
 
 
+def _default_static_seed_host(bind_host: str) -> str:
+    normalized = str(bind_host).strip()
+    if not normalized or normalized in {"0.0.0.0", "::"}:
+        return "127.0.0.1"
+    return normalized
+
+
+def _default_static_seeds(
+    *,
+    bind_host: str,
+    bind_port: int,
+    base_port: int = _DEFAULT_STATIC_SEED_BASE_PORT,
+    count: int = _DEFAULT_STATIC_SEED_COUNT,
+) -> list[NodeAddress]:
+    host = _default_static_seed_host(bind_host)
+    seeds: list[NodeAddress] = []
+    for offset in range(max(1, count)):
+        port = base_port + offset
+        if port == bind_port:
+            continue
+        if port < 1 or port > 65535:
+            continue
+        seeds.append(NodeAddress(host=host, port=port))
+    return seeds
+
+
 def _build_cluster_config() -> ClusterConfig:
     bind_host = _get_env("DPC_BIND_HOST", "0.0.0.0")
     bind_port_env = _get_env_optional("DPC_BIND_PORT")
@@ -108,7 +136,7 @@ def _build_cluster_config() -> ClusterConfig:
     cluster_name = _get_env("DPC_CLUSTER_NAME", "dpc-fastapi-example")
     advertise_host = _get_env_optional("DPC_ADVERTISE_HOST")
     consistency_name = _get_env("DPC_CONSISTENCY", "best_effort")
-    discovery_name = _get_env("DPC_DISCOVERY", "multicast").lower()
+    discovery_name = _get_env("DPC_DISCOVERY", "both").lower()
     static_seeds = _parse_seeds(_get_env_optional("DPC_STATIC_SEEDS") or "")
 
     config_kwargs: dict[str, Any] = {
@@ -118,15 +146,6 @@ def _build_cluster_config() -> ClusterConfig:
     }
     if advertise_host:
         config_kwargs["advertise_host"] = advertise_host
-
-    if discovery_name == "static":
-        config_kwargs["enabled_discovery"] = (DiscoveryMode.STATIC,)
-        config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
-    elif discovery_name == "both":
-        config_kwargs["enabled_discovery"] = (DiscoveryMode.MULTICAST, DiscoveryMode.STATIC)
-        config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
-    elif discovery_name != "multicast":
-        raise RuntimeError("DPC_DISCOVERY must be one of: multicast, static, both.")
 
     if bind_port_env is None:
         chosen_bind_port = _find_first_available_port(bind_host, bind_port)
@@ -138,6 +157,25 @@ def _build_cluster_config() -> ClusterConfig:
             )
         bind_port = chosen_bind_port
         config_kwargs["bind"] = NodeAddress(bind_host, bind_port)
+
+    if discovery_name in {"static", "both"} and not static_seeds:
+        seed_base_port = _parse_int("DPC_STATIC_SEED_BASE_PORT", _DEFAULT_STATIC_SEED_BASE_PORT)
+        seed_count = _parse_int("DPC_STATIC_SEED_COUNT", _DEFAULT_STATIC_SEED_COUNT)
+        static_seeds = _default_static_seeds(
+            bind_host=bind_host,
+            bind_port=bind_port,
+            base_port=seed_base_port,
+            count=seed_count,
+        )
+
+    if discovery_name == "static":
+        config_kwargs["enabled_discovery"] = (DiscoveryMode.STATIC,)
+        config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
+    elif discovery_name == "both":
+        config_kwargs["enabled_discovery"] = (DiscoveryMode.MULTICAST, DiscoveryMode.STATIC)
+        config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
+    elif discovery_name != "multicast":
+        raise RuntimeError("DPC_DISCOVERY must be one of: multicast, static, both.")
 
     return ClusterConfig(**config_kwargs)
 
@@ -223,6 +261,8 @@ def cluster_state() -> dict[str, Any]:
         "node_id": node.node_id,
         "bind": node.config.bind.as_dict(),
         "advertise": node.config.advertise_address.as_dict(),
+        "enabled_discovery": [mode.value for mode in node.config.enabled_discovery],
+        "static_seeds": [seed.as_dict() for seed in node.config.static_discovery.seeds],
         "is_leader": node.is_leader,
         "members": [member.as_dict() for member in node.members()],
     }

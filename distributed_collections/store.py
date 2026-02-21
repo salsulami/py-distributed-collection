@@ -67,59 +67,94 @@ class ClusterDataStore:
         mapping = self._maps.setdefault(name, {})
         if action == "put":
             key = str(mutation["key"])
+            existed = key in mapping
             previous = mapping.get(key)
             mapping[key] = mutation["value"]
-            return previous
-        if action == "remove":
+            return {"existed": existed, "previous": previous}
+        if action in {"remove", "expire_key"}:
             key = str(mutation["key"])
-            return mapping.pop(key, None)
+            if key in mapping:
+                return {"removed": True, "value": mapping.pop(key)}
+            return {"removed": False, "value": None}
         if action == "clear":
+            removed_items = [{"key": key, "value": value} for key, value in mapping.items()]
             mapping.clear()
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown map action: {action!r}")
 
     def _apply_list_mutation(self, name: str, action: str, mutation: dict[str, Any]) -> Any:
         target = self._lists.setdefault(name, [])
         if action == "append":
             target.append(mutation["value"])
-            return None
+            return {"added": True, "index": len(target) - 1, "value": mutation["value"]}
         if action == "extend":
             values = list(mutation["values"])
+            start_index = len(target)
             target.extend(values)
-            return None
+            return {
+                "added_items": [
+                    {"index": start_index + index, "value": value}
+                    for index, value in enumerate(values)
+                ]
+            }
         if action == "set":
             index = int(mutation["index"])
             previous = target[index]
             target[index] = mutation["value"]
-            return previous
+            return {"updated": True, "index": index, "previous": previous, "value": mutation["value"]}
         if action == "pop":
             if "index" in mutation and mutation["index"] is not None:
-                return target.pop(int(mutation["index"]))
-            return target.pop()
+                index = int(mutation["index"])
+                resolved_index = index if index >= 0 else len(target) + index
+                value = target.pop(index)
+                return {"removed": True, "index": resolved_index, "value": value}
+            resolved_index = len(target) - 1
+            value = target.pop()
+            return {"removed": True, "index": resolved_index, "value": value}
         if action == "remove_value":
             value = mutation["value"]
             try:
-                target.remove(value)
-                return True
+                index = target.index(value)
+                target.pop(index)
+                return {"removed": True, "index": index, "value": value}
             except ValueError:
-                return False
+                return {"removed": False, "index": None, "value": value}
+        if action == "expire_index":
+            index = int(mutation["index"])
+            resolved_index = index if index >= 0 else len(target) + index
+            if resolved_index < 0 or resolved_index >= len(target):
+                return {"removed": False, "index": None, "value": None}
+            value = target.pop(resolved_index)
+            return {"removed": True, "index": resolved_index, "value": value}
         if action == "clear":
+            removed_items = [{"index": index, "value": value} for index, value in enumerate(target)]
             target.clear()
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown list action: {action!r}")
 
     def _apply_queue_mutation(self, name: str, action: str, mutation: dict[str, Any]) -> Any:
         target = self._queues.setdefault(name, deque())
         if action == "offer":
             target.append(mutation["value"])
-            return None
+            return {"added": True, "index": len(target) - 1, "value": mutation["value"]}
         if action == "poll":
             if not target:
-                return None
-            return target.popleft()
+                return {"removed": False, "index": None, "value": None}
+            value = target.popleft()
+            return {"removed": True, "index": 0, "value": value}
+        if action == "expire_index":
+            index = int(mutation["index"])
+            resolved_index = index if index >= 0 else len(target) + index
+            if resolved_index < 0 or resolved_index >= len(target):
+                return {"removed": False, "index": None, "value": None}
+            values = list(target)
+            value = values.pop(resolved_index)
+            self._queues[name] = deque(values)
+            return {"removed": True, "index": resolved_index, "value": value}
         if action == "clear":
+            removed_items = [{"index": index, "value": value} for index, value in enumerate(target)]
             target.clear()
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown queue action: {action!r}")
 
     def map_get(self, name: str, key: str, default: Any = None) -> Any:

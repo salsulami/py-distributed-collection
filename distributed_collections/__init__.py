@@ -74,6 +74,7 @@ from .backends import StoreBackend, available_backends, create_node, create_stor
 from .config import (
     ACLConfig,
     ClusterConfig,
+    CollectionTTLConfig,
     CPSubsystemConfig,
     ConsensusConfig,
     ConsistencyConfig,
@@ -108,6 +109,7 @@ __all__ = [
     "create_node",
     "create_store",
     "ACLConfig",
+    "CollectionTTLConfig",
     "ConsensusConfig",
     "CPSubsystemConfig",
     "ConsistencyConfig",

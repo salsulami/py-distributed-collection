@@ -67,6 +67,31 @@ class DistributedMap(MutableMapping[str, Any]):
         """Return a full dictionary snapshot of the map."""
         return self._cluster._map_items(self._name)
 
+    def set_ttl(self, ttl_seconds: float | None) -> None:
+        """
+        Configure component-level TTL for all entries in this map.
+
+        Passing ``None`` disables TTL for this map.
+        """
+        self._cluster._set_component_ttl("map", self._name, ttl_seconds)
+
+    def ttl_seconds(self) -> float | None:
+        """Return configured map TTL in seconds, or ``None`` when disabled."""
+        return self._cluster._get_component_ttl("map", self._name)
+
+    def add_listener(self, callback: Callable[[dict[str, Any]], None]) -> str:
+        """
+        Register a callback for map item lifecycle events.
+
+        Event payload includes ``event`` (added/updated/deleted/evicted), the
+        map ``name``, and mutation-specific fields like ``key`` and ``value``.
+        """
+        return self._cluster._collection_add_listener("map", self._name, callback)
+
+    def remove_listener(self, subscription_id: str) -> bool:
+        """Unregister a previously added map event listener."""
+        return self._cluster._collection_remove_listener("map", self._name, subscription_id)
+
     def __getitem__(self, key: str) -> Any:
         value = self.get(key)
         if value is None and not self._cluster._map_contains(self._name, key):
@@ -139,6 +164,31 @@ class DistributedList:
         """Return a snapshot copy of the current list values."""
         return self._cluster._list_values(self._name)
 
+    def set_ttl(self, ttl_seconds: float | None) -> None:
+        """
+        Configure component-level TTL for all items in this list.
+
+        Passing ``None`` disables TTL for this list.
+        """
+        self._cluster._set_component_ttl("list", self._name, ttl_seconds)
+
+    def ttl_seconds(self) -> float | None:
+        """Return configured list TTL in seconds, or ``None`` when disabled."""
+        return self._cluster._get_component_ttl("list", self._name)
+
+    def add_listener(self, callback: Callable[[dict[str, Any]], None]) -> str:
+        """
+        Register a callback for list item lifecycle events.
+
+        Event payload includes ``event`` (added/updated/deleted/evicted), list
+        ``name``, and fields like ``index`` and ``value``.
+        """
+        return self._cluster._collection_add_listener("list", self._name, callback)
+
+    def remove_listener(self, subscription_id: str) -> bool:
+        """Unregister a previously added list event listener."""
+        return self._cluster._collection_remove_listener("list", self._name, subscription_id)
+
     def __getitem__(self, index: int) -> Any:
         return self.values()[index]
 
@@ -188,6 +238,31 @@ class DistributedQueue:
     def values(self) -> list[Any]:
         """Return queue content from head to tail."""
         return self._cluster._queue_values(self._name)
+
+    def set_ttl(self, ttl_seconds: float | None) -> None:
+        """
+        Configure component-level TTL for all queue items.
+
+        Passing ``None`` disables TTL for this queue.
+        """
+        self._cluster._set_component_ttl("queue", self._name, ttl_seconds)
+
+    def ttl_seconds(self) -> float | None:
+        """Return configured queue TTL in seconds, or ``None`` when disabled."""
+        return self._cluster._get_component_ttl("queue", self._name)
+
+    def add_listener(self, callback: Callable[[dict[str, Any]], None]) -> str:
+        """
+        Register a callback for queue item lifecycle events.
+
+        Event payload includes ``event`` (added/updated/deleted/evicted), queue
+        ``name``, and fields like ``index`` and ``value``.
+        """
+        return self._cluster._collection_add_listener("queue", self._name, callback)
+
+    def remove_listener(self, subscription_id: str) -> bool:
+        """Unregister a previously added queue event listener."""
+        return self._cluster._collection_remove_listener("queue", self._name, subscription_id)
 
     def size(self) -> int:
         """Return queue length."""

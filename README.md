@@ -24,6 +24,7 @@ Hazelcast-inspired distributed collections for Python services, with support for
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Collection listeners and component TTL](#collection-listeners-and-component-ttl)
 - [Switching storage backends](#switching-storage-backends)
 - [Operational endpoints](#operational-endpoints)
 - [API reference](#api-reference)
@@ -170,6 +171,47 @@ In Redis mode, all nodes use shared Redis state for `map`/`list`/`queue`.
 
 ---
 
+## Collection listeners and component TTL
+
+```python
+from distributed_collections import ClusterConfig, CollectionTTLConfig, ClusterNode
+
+config = ClusterConfig(
+    cluster_name="orders",
+    collection_ttl=CollectionTTLConfig(
+        map_ttl_seconds={"users": 300},
+        list_ttl_seconds={"active_sessions": 120},
+        queue_ttl_seconds={"outbox": 30},
+    ),
+)
+node = ClusterNode(config)
+node.start()
+
+users = node.get_map("users")
+users.add_listener(lambda event: print("map event:", event))
+users.put("u-1", {"name": "Alice"})    # added
+users.put("u-1", {"name": "Alice V2"}) # updated
+users.remove("u-1")                    # deleted
+
+outbox = node.get_queue("outbox")
+outbox.add_listener(lambda event: print("queue event:", event))
+outbox.offer({"id": "m-1"})            # added
+
+# TTL can also be configured/changed at runtime per component:
+outbox.set_ttl(45.0)
+# outbox.set_ttl(None)  # disable queue TTL
+```
+
+Listener event payload includes:
+
+- `event`: `added`, `updated`, `deleted`, `evicted`
+- `collection`: `map`, `list`, `queue`
+- `name`: component name
+- mutation fields (for example `key`, `index`, `value`, `old_value`)
+- `source`: `local` or `remote`
+
+---
+
 ## Switching storage backends
 
 Choose backend with one argument:
@@ -261,6 +303,10 @@ Node API equivalents:
 - `remove(key)`
 - `clear()`
 - `items_dict()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 - mapping protocol: `__getitem__`, `__setitem__`, `__delitem__`, iteration, `len()`
 
 ### `DistributedList`
@@ -271,6 +317,10 @@ Node API equivalents:
 - `remove(value)`
 - `clear()`
 - `values()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 - list-like protocol: `__getitem__`, `__setitem__`, iteration, `len()`
 
 ### `DistributedQueue`
@@ -281,6 +331,10 @@ Node API equivalents:
 - `clear()`
 - `values()`
 - `size()` / `len()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 
 ### `DistributedTopic`
 
@@ -319,6 +373,7 @@ Node API equivalents:
 | `wal` | `WriteAheadLogConfig` | defaults below |
 | `consensus` | `ConsensusConfig` | defaults below |
 | `consistency` | `ConsistencyConfig` | defaults below |
+| `collection_ttl` | `CollectionTTLConfig` | defaults below |
 | `observability` | `ObservabilityConfig` | defaults below |
 | `upgrade` | `UpgradeConfig` | defaults below |
 
@@ -433,6 +488,16 @@ Node API equivalents:
 |---|---|---|
 | `mode` | `ConsistencyMode` | `LINEARIZABLE` |
 | `write_timeout_seconds` | `float` | `3.0` |
+
+### `CollectionTTLConfig`
+
+| Field | Type | Default |
+|---|---|---|
+| `map_ttl_seconds` | `dict[str, float]` | `{}` |
+| `list_ttl_seconds` | `dict[str, float]` | `{}` |
+| `queue_ttl_seconds` | `dict[str, float]` | `{}` |
+| `sweep_interval_seconds` | `float` | `0.5` |
+| `max_evictions_per_cycle` | `int` | `256` |
 
 ### `ObservabilityConfig`
 

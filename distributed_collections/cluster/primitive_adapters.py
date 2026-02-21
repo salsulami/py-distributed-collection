@@ -9,23 +9,29 @@ class ClusterPrimitiveAdapterMixin:
     """
 
     def _map_put(self, map_name: str, key: str, value: Any) -> Any:
-        return self._submit_local_operation(
+        result = self._submit_local_operation(
             collection="map",
             name=map_name,
             action="put",
             values={"key": key, "value": value},
         )
+        if isinstance(result, dict):
+            return result.get("previous")
+        return result
 
     def _map_get(self, map_name: str, key: str, default: Any = None) -> Any:
         return self._store.map_get(map_name, key, default)
 
     def _map_remove(self, map_name: str, key: str) -> Any:
-        return self._submit_local_operation(
+        result = self._submit_local_operation(
             collection="map",
             name=map_name,
             action="remove",
             values={"key": key},
         )
+        if isinstance(result, dict):
+            return result.get("value") if bool(result.get("removed")) else None
+        return result
 
     def _map_clear(self, map_name: str) -> None:
         self._submit_local_operation(
@@ -60,30 +66,37 @@ class ClusterPrimitiveAdapterMixin:
         )
 
     def _list_set(self, list_name: str, index: int, value: Any) -> Any:
-        return self._submit_local_operation(
+        result = self._submit_local_operation(
             collection="list",
             name=list_name,
             action="set",
             values={"index": index, "value": value},
         )
+        if isinstance(result, dict):
+            return result.get("previous")
+        return result
 
     def _list_pop(self, list_name: str, index: int | None = None) -> Any:
-        return self._submit_local_operation(
+        result = self._submit_local_operation(
             collection="list",
             name=list_name,
             action="pop",
             values={"index": index},
         )
+        if isinstance(result, dict):
+            return result.get("value")
+        return result
 
     def _list_remove_value(self, list_name: str, value: Any) -> bool:
-        return bool(
-            self._submit_local_operation(
-                collection="list",
-                name=list_name,
-                action="remove_value",
-                values={"value": value},
-            )
+        result = self._submit_local_operation(
+            collection="list",
+            name=list_name,
+            action="remove_value",
+            values={"value": value},
         )
+        if isinstance(result, dict):
+            return bool(result.get("removed"))
+        return bool(result)
 
     def _list_clear(self, list_name: str) -> None:
         self._submit_local_operation(
@@ -107,11 +120,14 @@ class ClusterPrimitiveAdapterMixin:
         )
 
     def _queue_poll(self, queue_name: str) -> Any:
-        return self._submit_local_operation(
+        result = self._submit_local_operation(
             collection="queue",
             name=queue_name,
             action="poll",
         )
+        if isinstance(result, dict):
+            return result.get("value") if bool(result.get("removed")) else None
+        return result
 
     def _queue_clear(self, queue_name: str) -> None:
         self._submit_local_operation(

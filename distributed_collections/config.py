@@ -280,6 +280,23 @@ class ConsistencyConfig:
 
 
 @dataclass(slots=True)
+class CollectionTTLConfig:
+    """
+    Component-level TTL settings for distributed data structures.
+
+    TTL is configured per logical component name (map/list/queue), not per item.
+    Every item added or updated in a configured component inherits that
+    component's TTL.
+    """
+
+    map_ttl_seconds: dict[str, float] = field(default_factory=dict)
+    list_ttl_seconds: dict[str, float] = field(default_factory=dict)
+    queue_ttl_seconds: dict[str, float] = field(default_factory=dict)
+    sweep_interval_seconds: float = 0.5
+    max_evictions_per_cycle: int = 256
+
+
+@dataclass(slots=True)
 class CPSubsystemConfig:
     """
     Strong-consistency coordination subsystem settings.
@@ -340,6 +357,8 @@ class ClusterConfig:
         Leader election and split-brain protection settings.
     consistency:
         Mutation consistency guarantees for write commits.
+    collection_ttl:
+        Optional per-component TTL configuration for map/list/queue items.
     cp:
         CP subsystem behavior for strong-consistency coordination primitives.
     tls:
@@ -372,6 +391,7 @@ class ClusterConfig:
     wal: WriteAheadLogConfig = field(default_factory=WriteAheadLogConfig)
     consensus: ConsensusConfig = field(default_factory=ConsensusConfig)
     consistency: ConsistencyConfig = field(default_factory=ConsistencyConfig)
+    collection_ttl: CollectionTTLConfig = field(default_factory=CollectionTTLConfig)
     cp: CPSubsystemConfig = field(default_factory=CPSubsystemConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
     upgrade: UpgradeConfig = field(default_factory=UpgradeConfig)
@@ -409,6 +429,24 @@ class ClusterConfig:
             raise ValueError("SecurityConfig.shared_token cannot be blank when provided.")
         if self.consistency.write_timeout_seconds <= 0:
             raise ValueError("ConsistencyConfig.write_timeout_seconds must be > 0.")
+        if self.collection_ttl.sweep_interval_seconds <= 0:
+            raise ValueError("CollectionTTLConfig.sweep_interval_seconds must be > 0.")
+        if self.collection_ttl.max_evictions_per_cycle <= 0:
+            raise ValueError("CollectionTTLConfig.max_evictions_per_cycle must be >= 1.")
+        for collection_label, mapping in (
+            ("map", self.collection_ttl.map_ttl_seconds),
+            ("list", self.collection_ttl.list_ttl_seconds),
+            ("queue", self.collection_ttl.queue_ttl_seconds),
+        ):
+            for name, ttl_seconds in mapping.items():
+                if not str(name):
+                    raise ValueError(
+                        f"CollectionTTLConfig.{collection_label}_ttl_seconds keys must be non-empty."
+                    )
+                if float(ttl_seconds) <= 0:
+                    raise ValueError(
+                        f"CollectionTTLConfig.{collection_label}_ttl_seconds[{name!r}] must be > 0."
+                    )
         if self.consensus.election_timeout_seconds <= 0:
             raise ValueError("ConsensusConfig.election_timeout_seconds must be > 0.")
         if self.consensus.heartbeat_interval_seconds <= 0:

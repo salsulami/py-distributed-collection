@@ -22,6 +22,7 @@ class ClusterLifecycleMixin:
             if not self._store_is_centralized:
                 self._load_snapshot_if_enabled()
                 self._replay_wal_if_enabled()
+            self._hydrate_all_component_ttls()
 
             self._transport.start()
             self._start_replication_workers()
@@ -42,6 +43,7 @@ class ClusterLifecycleMixin:
                 self._discovery_responder.start()
 
             self._running = True
+            self._start_ttl_worker()
             if self.config.consensus.enabled:
                 with self._consensus_lock:
                     if self._leader_id is None and not self.members():
@@ -64,6 +66,7 @@ class ClusterLifecycleMixin:
             if not self._running:
                 return
             self._running = False
+            self._stop_ttl_worker()
 
             if self._discovery_responder:
                 self._discovery_responder.stop()

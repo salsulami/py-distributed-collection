@@ -52,13 +52,11 @@ Or with classmethod syntax:
 
 Typical usage::
 
-    from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
+    from distributed_collections import ClusterConfig, ClusterNode
 
     node = ClusterNode(
         ClusterConfig(
             cluster_name="orders",
-            bind=NodeAddress("0.0.0.0", 5701),
-            advertise_host="10.0.0.5",
         )
     )
     node.start()

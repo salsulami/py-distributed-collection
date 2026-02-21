@@ -24,6 +24,7 @@ Hazelcast-inspired distributed collections for Python services, with support for
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Docker and Kubernetes behavior](#docker-and-kubernetes-behavior)
 - [Collection listeners and component TTL](#collection-listeners-and-component-ttl)
 - [Switching storage backends](#switching-storage-backends)
 - [Operational endpoints](#operational-endpoints)
@@ -131,13 +132,11 @@ pip install -e redis_backend
 ### 1) Minimal in-memory node
 
 ```python
-from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
+from distributed_collections import ClusterConfig, ClusterNode
 
 node = ClusterNode(
     ClusterConfig(
         cluster_name="orders",
-        bind=NodeAddress("0.0.0.0", 5701),
-        advertise_host="10.0.0.5",
     )
 )
 node.start()
@@ -168,6 +167,43 @@ node.start()
 ```
 
 In Redis mode, all nodes use shared Redis state for `map`/`list`/`queue`.
+
+---
+
+## Docker and Kubernetes behavior
+
+### Address defaults
+
+- You do **not** need to pass `bind` or `advertise_host` for normal usage.
+- By default, node binds on `0.0.0.0:5701`.
+- `advertise_host` is auto-detected from the current node/container environment.
+- You can still override `bind` and/or `advertise_host` explicitly.
+
+### Discovery defaults
+
+- Default discovery strategy is **multicast**.
+- If your environment does not support multicast (common in Kubernetes), set static discovery:
+
+```python
+from distributed_collections import ClusterConfig, DiscoveryMode, NodeAddress, StaticDiscoveryConfig
+
+config = ClusterConfig(
+    cluster_name="orders",
+    enabled_discovery=(DiscoveryMode.STATIC,),
+    static_discovery=StaticDiscoveryConfig(
+        seeds=[
+            NodeAddress("orders-0.orders-headless.default.svc.cluster.local", 5701),
+            NodeAddress("orders-1.orders-headless.default.svc.cluster.local", 5701),
+        ]
+    ),
+)
+```
+
+### Practical notes
+
+- **Docker Compose / same L2 network**: multicast may work, static seeds are still more deterministic.
+- **Kubernetes pods**: multicast is often blocked by CNI/network policies; static service/DNS seeds are recommended.
+- For explicit pod IP advertisement, you can set environment variable `POD_IP` or `DISTRIBUTED_COLLECTIONS_ADVERTISE_HOST`.
 
 ---
 
@@ -358,10 +394,10 @@ Node API equivalents:
 |---|---|---|
 | `cluster_name` | `str` | `"default"` |
 | `bind` | `NodeAddress` | `NodeAddress("0.0.0.0", 5701)` |
-| `advertise_host` | `str` | `"127.0.0.1"` |
+| `advertise_host` | `str \| None` | `None` (auto-detect current node address) |
 | `static_discovery` | `StaticDiscoveryConfig` | empty seeds |
 | `multicast` | `MulticastDiscoveryConfig` | defaults below |
-| `enabled_discovery` | `tuple[DiscoveryMode, ...]` | `(STATIC, MULTICAST)` |
+| `enabled_discovery` | `tuple[DiscoveryMode, ...]` | `(MULTICAST,)` |
 | `socket_timeout_seconds` | `float` | `2.0` |
 | `reconnect_interval_seconds` | `float` | `3.0` |
 | `auto_sync_on_join` | `bool` | `True` |

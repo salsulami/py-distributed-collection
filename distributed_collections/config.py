@@ -17,8 +17,53 @@ make deployment behavior easy to reason about in multi-node environments.
 
 from __future__ import annotations
 
+import os
+import socket
 from dataclasses import dataclass, field
 from enum import Enum
+
+
+def _detect_current_node_address(bind_host: str) -> str:
+    """
+    Best-effort local address detection for peer advertisement.
+
+    Priority order:
+    1) explicit environment overrides (useful in containers/K8s)
+    2) explicit non-wildcard bind host
+    3) UDP socket route-based detection
+    4) hostname resolution fallback
+    5) loopback fallback
+    """
+    for env_name in ("DISTRIBUTED_COLLECTIONS_ADVERTISE_HOST", "POD_IP"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value
+
+    normalized_bind = str(bind_host).strip()
+    if normalized_bind and normalized_bind not in {"0.0.0.0", "::"}:
+        return normalized_bind
+
+    for probe in ("10.255.255.255", "192.0.2.1", "8.8.8.8"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((probe, 80))
+                candidate = sock.getsockname()[0].strip()
+                if candidate and candidate != "0.0.0.0":
+                    return candidate
+        except OSError:
+            continue
+
+    for host_candidate in (os.getenv("HOSTNAME", "").strip(), socket.gethostname().strip()):
+        if not host_candidate:
+            continue
+        try:
+            resolved = socket.gethostbyname(host_candidate).strip()
+        except OSError:
+            continue
+        if resolved and resolved != "0.0.0.0":
+            return resolved
+
+    return "127.0.0.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,9 +371,9 @@ class ClusterConfig:
     bind:
         Local address to bind the TCP listener to.
     advertise_host:
-        Reachable host/IP that is shared with remote peers during discovery and
-        handshakes. This can differ from ``bind.host`` when binding to
-        ``0.0.0.0``.
+        Reachable host/IP shared with remote peers during discovery and
+        handshakes. When not set (or set to ``"auto"``), the runtime
+        auto-detects the current node address.
     static_discovery:
         Static seed peer settings.
     multicast:
@@ -373,13 +418,10 @@ class ClusterConfig:
 
     cluster_name: str = "default"
     bind: NodeAddress = field(default_factory=lambda: NodeAddress("0.0.0.0", 5701))
-    advertise_host: str = "127.0.0.1"
+    advertise_host: str | None = None
     static_discovery: StaticDiscoveryConfig = field(default_factory=StaticDiscoveryConfig)
     multicast: MulticastDiscoveryConfig = field(default_factory=MulticastDiscoveryConfig)
-    enabled_discovery: tuple[DiscoveryMode, ...] = (
-        DiscoveryMode.STATIC,
-        DiscoveryMode.MULTICAST,
-    )
+    enabled_discovery: tuple[DiscoveryMode, ...] = (DiscoveryMode.MULTICAST,)
     socket_timeout_seconds: float = 2.0
     reconnect_interval_seconds: float = 3.0
     auto_sync_on_join: bool = True
@@ -400,6 +442,14 @@ class ClusterConfig:
         """Validate configuration values that affect runtime safety."""
         if not self.cluster_name:
             raise ValueError("ClusterConfig.cluster_name must be non-empty.")
+        advertise_host = (
+            ""
+            if self.advertise_host is None
+            else str(self.advertise_host).strip()
+        )
+        if not advertise_host or advertise_host.lower() == "auto":
+            advertise_host = _detect_current_node_address(self.bind.host)
+        self.advertise_host = advertise_host
         if self.socket_timeout_seconds <= 0:
             raise ValueError("ClusterConfig.socket_timeout_seconds must be > 0.")
         if self.reconnect_interval_seconds < 0:

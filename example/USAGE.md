@@ -67,6 +67,8 @@ Notes:
 - If `DPC_STATIC_SEEDS` is unset, default local fallback seeds are generated from ports `5711..5726`.
 - App retries `join_cluster()` periodically so late-starting nodes can still be discovered.
 - For deterministic static discovery, set `DPC_DISCOVERY=static` and provide explicit `DPC_STATIC_SEEDS`.
+- Example defaults disable persistence/WAL for memory backend, so process restarts start from empty state.
+- If you use Redis backend, data durability depends on Redis and is not process-ephemeral.
 
 Start instance A (terminal 1):
 

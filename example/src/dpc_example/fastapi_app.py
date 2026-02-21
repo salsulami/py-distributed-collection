@@ -22,7 +22,9 @@ from distributed_collections import (
     ConsistencyMode,
     DiscoveryMode,
     NodeAddress,
+    PersistenceConfig,
     StaticDiscoveryConfig,
+    WriteAheadLogConfig,
     create_node,
 )
 from distributed_collections.exceptions import ClusterNotRunningError
@@ -154,6 +156,9 @@ def _build_cluster_config() -> ClusterConfig:
         "cluster_name": cluster_name,
         "bind": NodeAddress(bind_host, bind_port),
         "consistency": ConsistencyConfig(mode=ConsistencyMode(consistency_name)),
+        # Example defaults are intentionally ephemeral for memory backend demos.
+        "persistence": PersistenceConfig(enabled=False),
+        "wal": WriteAheadLogConfig(enabled=False),
     }
     if advertise_host:
         config_kwargs["advertise_host"] = advertise_host

@@ -44,3 +44,67 @@ You can also customize ports and consistency mode:
 ```bash
 dpc-example --port-a 5811 --port-b 5812 --consistency quorum
 ```
+
+## Run FastAPI replication example across multiple instances
+
+Install example package:
+
+```bash
+pip install -e example
+```
+
+Start instance A (terminal 1):
+
+```bash
+DPC_API_PORT=8001 \
+DPC_BIND_PORT=5711 \
+DPC_DISCOVERY=static \
+DPC_STATIC_SEEDS=127.0.0.1:5712 \
+dpc-example-api
+```
+
+Start instance B (terminal 2):
+
+```bash
+DPC_API_PORT=8002 \
+DPC_BIND_PORT=5712 \
+DPC_DISCOVERY=static \
+DPC_STATIC_SEEDS=127.0.0.1:5711 \
+dpc-example-api
+```
+
+Write through instance A and read from instance B:
+
+```bash
+curl -X PUT "http://127.0.0.1:8001/map/users/u-1" \
+  -H "content-type: application/json" \
+  -d '{"value":{"name":"Alice","role":"admin"}}'
+
+curl "http://127.0.0.1:8002/map/users"
+```
+
+Queue/list replication checks:
+
+```bash
+curl -X POST "http://127.0.0.1:8001/queue/jobs/offer" \
+  -H "content-type: application/json" \
+  -d '{"value":"job-1"}'
+
+curl "http://127.0.0.1:8002/queue/jobs"
+
+curl -X POST "http://127.0.0.1:8001/list/events/append" \
+  -H "content-type: application/json" \
+  -d '{"value":{"kind":"created","id":"u-1"}}'
+
+curl "http://127.0.0.1:8002/list/events"
+```
+
+Topic broadcast check:
+
+```bash
+curl -X POST "http://127.0.0.1:8001/topic/alerts/publish" \
+  -H "content-type: application/json" \
+  -d '{"message":{"level":"info","message":"replication works"}}'
+
+curl "http://127.0.0.1:8002/topic/alerts/messages"
+```

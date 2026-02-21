@@ -24,6 +24,8 @@ Hazelcast-inspired distributed collections for Python services, with support for
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Docker and Kubernetes behavior](#docker-and-kubernetes-behavior)
+- [Collection listeners and component TTL](#collection-listeners-and-component-ttl)
 - [Switching storage backends](#switching-storage-backends)
 - [Operational endpoints](#operational-endpoints)
 - [API reference](#api-reference)
@@ -130,13 +132,11 @@ pip install -e redis_backend
 ### 1) Minimal in-memory node
 
 ```python
-from distributed_collections import ClusterConfig, ClusterNode, NodeAddress
+from distributed_collections import ClusterConfig, ClusterNode
 
 node = ClusterNode(
     ClusterConfig(
         cluster_name="orders",
-        bind=NodeAddress("0.0.0.0", 5701),
-        advertise_host="10.0.0.5",
     )
 )
 node.start()
@@ -167,6 +167,85 @@ node.start()
 ```
 
 In Redis mode, all nodes use shared Redis state for `map`/`list`/`queue`.
+
+---
+
+## Docker and Kubernetes behavior
+
+### Address defaults
+
+- You do **not** need to pass `bind` or `advertise_host` for normal usage.
+- By default, node binds on `0.0.0.0:5701`.
+- `advertise_host` is auto-detected from the current node/container environment.
+- You can still override `bind` and/or `advertise_host` explicitly.
+
+### Discovery defaults
+
+- Default discovery strategy is **multicast**.
+- In multicast mode, when `advertise_host` is auto, discovery probes/replies use the node's current assigned IP by default.
+- If your environment does not support multicast (common in Kubernetes), set static discovery:
+
+```python
+from distributed_collections import ClusterConfig, DiscoveryMode, NodeAddress, StaticDiscoveryConfig
+
+config = ClusterConfig(
+    cluster_name="orders",
+    enabled_discovery=(DiscoveryMode.STATIC,),
+    static_discovery=StaticDiscoveryConfig(
+        seeds=[
+            NodeAddress("orders-0.orders-headless.default.svc.cluster.local", 5701),
+            NodeAddress("orders-1.orders-headless.default.svc.cluster.local", 5701),
+        ]
+    ),
+)
+```
+
+### Practical notes
+
+- **Docker Compose / same L2 network**: multicast may work, static seeds are still more deterministic.
+- **Kubernetes pods**: multicast is often blocked by CNI/network policies; static service/DNS seeds are recommended.
+- For explicit pod IP advertisement, you can set environment variable `POD_IP` or `DISTRIBUTED_COLLECTIONS_ADVERTISE_HOST`.
+
+---
+
+## Collection listeners and component TTL
+
+```python
+from distributed_collections import ClusterConfig, CollectionTTLConfig, ClusterNode
+
+config = ClusterConfig(
+    cluster_name="orders",
+    collection_ttl=CollectionTTLConfig(
+        map_ttl_seconds={"users": 300},
+        list_ttl_seconds={"active_sessions": 120},
+        queue_ttl_seconds={"outbox": 30},
+    ),
+)
+node = ClusterNode(config)
+node.start()
+
+users = node.get_map("users")
+users.add_listener(lambda event: print("map event:", event))
+users.put("u-1", {"name": "Alice"})    # added
+users.put("u-1", {"name": "Alice V2"}) # updated
+users.remove("u-1")                    # deleted
+
+outbox = node.get_queue("outbox")
+outbox.add_listener(lambda event: print("queue event:", event))
+outbox.offer({"id": "m-1"})            # added
+
+# TTL can also be configured/changed at runtime per component:
+outbox.set_ttl(45.0)
+# outbox.set_ttl(None)  # disable queue TTL
+```
+
+Listener event payload includes:
+
+- `event`: `added`, `updated`, `deleted`, `evicted`
+- `collection`: `map`, `list`, `queue`
+- `name`: component name
+- mutation fields (for example `key`, `index`, `value`, `old_value`)
+- `source`: `local` or `remote`
 
 ---
 
@@ -220,6 +299,7 @@ Node API equivalents:
 - `node.metrics_text()`
 - `node.recent_traces()`
 - `node.stats()`
+- `node.is_leader` (bool property)
 
 ---
 
@@ -240,6 +320,7 @@ Node API equivalents:
 - `stop()`
 - `close()`
 - `is_running` (property)
+- `is_leader` (property)
 - `stats()`
 - `health()`
 - `metrics_text()`
@@ -261,6 +342,10 @@ Node API equivalents:
 - `remove(key)`
 - `clear()`
 - `items_dict()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 - mapping protocol: `__getitem__`, `__setitem__`, `__delitem__`, iteration, `len()`
 
 ### `DistributedList`
@@ -271,6 +356,10 @@ Node API equivalents:
 - `remove(value)`
 - `clear()`
 - `values()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 - list-like protocol: `__getitem__`, `__setitem__`, iteration, `len()`
 
 ### `DistributedQueue`
@@ -281,6 +370,10 @@ Node API equivalents:
 - `clear()`
 - `values()`
 - `size()` / `len()`
+- `set_ttl(ttl_seconds | None)`
+- `ttl_seconds()`
+- `add_listener(callback) -> subscription_id`
+- `remove_listener(subscription_id) -> bool`
 
 ### `DistributedTopic`
 
@@ -304,10 +397,10 @@ Node API equivalents:
 |---|---|---|
 | `cluster_name` | `str` | `"default"` |
 | `bind` | `NodeAddress` | `NodeAddress("0.0.0.0", 5701)` |
-| `advertise_host` | `str` | `"127.0.0.1"` |
+| `advertise_host` | `str \| None` | `None` (auto-detect current node address) |
 | `static_discovery` | `StaticDiscoveryConfig` | empty seeds |
 | `multicast` | `MulticastDiscoveryConfig` | defaults below |
-| `enabled_discovery` | `tuple[DiscoveryMode, ...]` | `(STATIC, MULTICAST)` |
+| `enabled_discovery` | `tuple[DiscoveryMode, ...]` | `(MULTICAST,)` |
 | `socket_timeout_seconds` | `float` | `2.0` |
 | `reconnect_interval_seconds` | `float` | `3.0` |
 | `auto_sync_on_join` | `bool` | `True` |
@@ -319,6 +412,7 @@ Node API equivalents:
 | `wal` | `WriteAheadLogConfig` | defaults below |
 | `consensus` | `ConsensusConfig` | defaults below |
 | `consistency` | `ConsistencyConfig` | defaults below |
+| `collection_ttl` | `CollectionTTLConfig` | defaults below |
 | `observability` | `ObservabilityConfig` | defaults below |
 | `upgrade` | `UpgradeConfig` | defaults below |
 
@@ -433,6 +527,16 @@ Node API equivalents:
 |---|---|---|
 | `mode` | `ConsistencyMode` | `LINEARIZABLE` |
 | `write_timeout_seconds` | `float` | `3.0` |
+
+### `CollectionTTLConfig`
+
+| Field | Type | Default |
+|---|---|---|
+| `map_ttl_seconds` | `dict[str, float]` | `{}` |
+| `list_ttl_seconds` | `dict[str, float]` | `{}` |
+| `queue_ttl_seconds` | `dict[str, float]` | `{}` |
+| `sweep_interval_seconds` | `float` | `0.5` |
+| `max_evictions_per_cycle` | `int` | `256` |
 
 ### `ObservabilityConfig`
 

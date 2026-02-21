@@ -17,6 +17,12 @@ class ClusterSecurityMixin:
             return True
         collection = str(payload.get("collection", ""))
         action = str(payload.get("action", ""))
+        if action == "expire_key":
+            action = "remove"
+        elif action == "expire_index" and collection == "list":
+            action = "pop"
+        elif action == "expire_index" and collection == "queue":
+            action = "poll"
         action_key = f"{collection}.{action}"
         permissions = self.config.acl.sender_permissions.get(sender_node_id)
         if permissions is None:

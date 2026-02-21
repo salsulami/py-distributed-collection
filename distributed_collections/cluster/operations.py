@@ -60,6 +60,7 @@ class ClusterOperationMixin:
         """
         Execute one operation on leader and replicate using configured mode.
         """
+        operation = self._augment_operation_with_ttl(operation)
         payload = self._build_operation_payload(operation, origin_node_id=origin_node_id)
         op_id = str(payload["op_id"])
         if not self._record_operation(op_id):
@@ -229,7 +230,26 @@ class ClusterOperationMixin:
             )
             return result
 
-        result = self._store.apply_mutation(payload)
+        result: Any
+        if action in {"expire_key", "expire_index"} and not self._ttl_eviction_guard_allows(payload):
+            result = {"removed": False}
+        else:
+            result = self._store.apply_mutation(payload)
+        self._apply_ttl_metadata(
+            collection=collection,
+            name=name,
+            action=action,
+            payload=payload,
+            result=result,
+        )
+        self._emit_collection_events_for_mutation(
+            collection=collection,
+            name=name,
+            action=action,
+            payload=payload,
+            result=result,
+            source=source,
+        )
         log_index = int(payload.get("log_index", 0))
         if source == "local":
             with self._consensus_lock:

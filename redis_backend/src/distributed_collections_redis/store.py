@@ -111,14 +111,16 @@ class RedisClusterDataStore:
     def _encode(self, value: Any) -> str:
         return json.dumps(value, separators=(",", ":"), sort_keys=True)
 
-    def _decode(self, value: bytes | str | None) -> Any:
-        if value is None:
+    def _decode(self, value: Any) -> Any:
+        if value is None or value is False:
             return None
         if isinstance(value, bytes):
             raw = value.decode("utf-8")
-        else:
+            return json.loads(raw)
+        if isinstance(value, str):
             raw = value
-        return json.loads(raw)
+            return json.loads(raw)
+        return value
 
     def _decode_text(self, value: bytes | str) -> str:
         if isinstance(value, bytes):
@@ -151,80 +153,167 @@ class RedisClusterDataStore:
         self._redis.sadd(self._idx_maps(), name)
         if action == "put":
             field = str(mutation["key"])
+            existed = bool(self._redis.hexists(key, field))
             previous = self._decode(self._redis.hget(key, field))
             self._redis.hset(key, field, self._encode(mutation["value"]))
-            return previous
-        if action == "remove":
+            return {"existed": existed, "previous": previous}
+        if action in {"remove", "expire_key"}:
             field = str(mutation["key"])
-            previous = self._decode(self._redis.hget(key, field))
-            self._redis.hdel(key, field)
+            existed = bool(self._redis.hexists(key, field))
+            previous = self._decode(self._redis.hget(key, field)) if existed else None
+            if existed:
+                self._redis.hdel(key, field)
             if self._redis.hlen(key) == 0:
                 self._redis.srem(self._idx_maps(), name)
-            return previous
+            return {"removed": existed, "value": previous}
         if action == "clear":
+            raw = self._redis.hgetall(key)
+            removed_items = [
+                {"key": self._decode_text(field), "value": self._decode(value)}
+                for field, value in raw.items()
+            ]
             self._redis.delete(key)
             self._redis.srem(self._idx_maps(), name)
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown map action: {action!r}")
 
     def _apply_list_mutation(self, *, name: str, action: str, mutation: dict[str, Any]) -> Any:
         key = self._key_list(name)
         if action == "append":
-            self._redis.rpush(key, self._encode(mutation["value"]))
+            new_length = int(self._redis.rpush(key, self._encode(mutation["value"])))
             self._redis.sadd(self._idx_lists(), name)
-            return None
+            return {"added": True, "index": new_length - 1, "value": mutation["value"]}
         if action == "extend":
-            values = [self._encode(item) for item in list(mutation["values"])]
+            raw_values = list(mutation["values"])
+            values = [self._encode(item) for item in raw_values]
+            start_index = int(self._redis.llen(key))
             if values:
                 self._redis.rpush(key, *values)
                 self._redis.sadd(self._idx_lists(), name)
-            return None
+            return {
+                "added_items": [
+                    {"index": start_index + index, "value": value}
+                    for index, value in enumerate(raw_values)
+                ]
+            }
         if action == "set":
             index = int(mutation["index"])
             previous = self._decode(self._redis.lindex(key, index))
             self._redis.lset(key, index, self._encode(mutation["value"]))
-            return previous
+            resolved_index = index
+            if resolved_index < 0:
+                resolved_index += int(self._redis.llen(key))
+            return {
+                "updated": True,
+                "index": resolved_index,
+                "previous": previous,
+                "value": mutation["value"],
+            }
         if action == "pop":
             index = mutation.get("index")
             if index is None:
+                length = int(self._redis.llen(key))
                 value = self._redis.rpop(key)
                 if self._redis.llen(key) == 0:
                     self._redis.srem(self._idx_lists(), name)
-                return self._decode(value)
+                decoded = self._decode(value)
+                if value is None:
+                    return {"removed": False, "index": None, "value": None}
+                return {"removed": True, "index": max(0, length - 1), "value": decoded}
+            length = int(self._redis.llen(key))
+            requested_index = int(index)
+            resolved_index = requested_index if requested_index >= 0 else length + requested_index
             popped = self._pop_index_script(
                 keys=[key],
-                args=[int(index), self._marker],
+                args=[requested_index, self._marker],
             )
             if self._redis.llen(key) == 0:
                 self._redis.srem(self._idx_lists(), name)
-            return self._decode(popped)
+            decoded = self._decode(popped)
+            if popped is None or popped is False:
+                return {"removed": False, "index": None, "value": None}
+            return {"removed": True, "index": resolved_index, "value": decoded}
         if action == "remove_value":
-            value = self._encode(mutation["value"])
-            removed = int(self._redis.lrem(key, 1, value))
+            encoded = self._encode(mutation["value"])
+            index: int | None = None
+            try:
+                located = self._redis.lpos(key, encoded)
+                if located is not None:
+                    index = int(located)
+            except Exception:
+                raw_values = self._redis.lrange(key, 0, -1)
+                for candidate_index, item in enumerate(raw_values):
+                    if self._decode_text(item) == encoded:
+                        index = candidate_index
+                        break
+            removed = int(self._redis.lrem(key, 1, encoded))
             if self._redis.llen(key) == 0:
                 self._redis.srem(self._idx_lists(), name)
-            return removed > 0
+            removed_flag = removed > 0
+            if not removed_flag:
+                index = None
+            return {"removed": removed_flag, "index": index, "value": mutation["value"]}
+        if action == "expire_index":
+            length = int(self._redis.llen(key))
+            requested_index = int(mutation["index"])
+            resolved_index = requested_index if requested_index >= 0 else length + requested_index
+            popped = self._pop_index_script(
+                keys=[key],
+                args=[requested_index, self._marker],
+            )
+            if self._redis.llen(key) == 0:
+                self._redis.srem(self._idx_lists(), name)
+            decoded = self._decode(popped)
+            if popped is None or popped is False:
+                return {"removed": False, "index": None, "value": None}
+            return {"removed": True, "index": resolved_index, "value": decoded}
         if action == "clear":
+            raw_removed = self._redis.lrange(key, 0, -1)
+            removed_items = [
+                {"index": index, "value": self._decode(value)}
+                for index, value in enumerate(raw_removed)
+            ]
             self._redis.delete(key)
             self._redis.srem(self._idx_lists(), name)
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown list action: {action!r}")
 
     def _apply_queue_mutation(self, *, name: str, action: str, mutation: dict[str, Any]) -> Any:
         key = self._key_queue(name)
         if action == "offer":
-            self._redis.rpush(key, self._encode(mutation["value"]))
+            new_length = int(self._redis.rpush(key, self._encode(mutation["value"])))
             self._redis.sadd(self._idx_queues(), name)
-            return None
+            return {"added": True, "index": new_length - 1, "value": mutation["value"]}
         if action == "poll":
             value = self._redis.lpop(key)
             if self._redis.llen(key) == 0:
                 self._redis.srem(self._idx_queues(), name)
-            return self._decode(value)
+            if value is None:
+                return {"removed": False, "index": None, "value": None}
+            return {"removed": True, "index": 0, "value": self._decode(value)}
+        if action == "expire_index":
+            length = int(self._redis.llen(key))
+            requested_index = int(mutation["index"])
+            resolved_index = requested_index if requested_index >= 0 else length + requested_index
+            popped = self._pop_index_script(
+                keys=[key],
+                args=[requested_index, self._marker],
+            )
+            if self._redis.llen(key) == 0:
+                self._redis.srem(self._idx_queues(), name)
+            decoded = self._decode(popped)
+            if popped is None or popped is False:
+                return {"removed": False, "index": None, "value": None}
+            return {"removed": True, "index": resolved_index, "value": decoded}
         if action == "clear":
+            raw_removed = self._redis.lrange(key, 0, -1)
+            removed_items = [
+                {"index": index, "value": self._decode(value)}
+                for index, value in enumerate(raw_removed)
+            ]
             self._redis.delete(key)
             self._redis.srem(self._idx_queues(), name)
-            return None
+            return {"removed_items": removed_items}
         raise UnsupportedOperationError(f"Unknown queue action: {action!r}")
 
     # ------------------------------------------------------------------ #

@@ -13,16 +13,57 @@ attempt TCP handshakes with the union of addresses.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 import threading
 import time
 from typing import Iterable
 
-from .config import ClusterConfig, NodeAddress
+from .config import ClusterConfig, NodeAddress, _detect_current_node_address
 
 _DISCOVER = "discover"
 _DISCOVER_REPLY = "discover_reply"
+
+
+def _resolve_ipv4_host(host: str) -> str | None:
+    candidate = str(host).strip()
+    if not candidate:
+        return None
+    try:
+        socket.inet_aton(candidate)
+        return candidate
+    except OSError:
+        pass
+    try:
+        resolved = socket.gethostbyname(candidate).strip()
+    except OSError:
+        return None
+    if not resolved:
+        return None
+    try:
+        socket.inet_aton(resolved)
+    except OSError:
+        return None
+    return resolved
+
+
+def _current_multicast_interface_ip(bind_host: str, advertise_host: str) -> str:
+    """
+    Resolve the current assigned IPv4 address used for multicast traffic.
+    """
+    interface_override = os.getenv("DISTRIBUTED_COLLECTIONS_MULTICAST_INTERFACE_IP", "").strip()
+    candidates = (
+        interface_override,
+        _detect_current_node_address(bind_host),
+        bind_host,
+        advertise_host,
+    )
+    for candidate in candidates:
+        resolved = _resolve_ipv4_host(candidate)
+        if resolved and resolved != "0.0.0.0":
+            return resolved
+    return "0.0.0.0"
 
 
 def discover_static_peers(config: ClusterConfig) -> list[NodeAddress]:
@@ -51,16 +92,20 @@ class MulticastDiscoveryResponder:
         cluster_name: str,
         node_id: str,
         advertise: NodeAddress,
+        bind_host: str,
         group: str,
         port: int,
         socket_timeout_seconds: float,
+        prefer_current_assigned_ip: bool = False,
     ) -> None:
         self._cluster_name = cluster_name
         self._node_id = node_id
         self._advertise = advertise
+        self._bind_host = bind_host
         self._group = group
         self._port = port
         self._socket_timeout_seconds = socket_timeout_seconds
+        self._prefer_current_assigned_ip = prefer_current_assigned_ip
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
 
@@ -85,9 +130,24 @@ class MulticastDiscoveryResponder:
     def _run(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
+            interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind(("", self._port))
-            membership = struct.pack("4s4s", socket.inet_aton(self._group), socket.inet_aton("0.0.0.0"))
+            try:
+                if interface_ip != "0.0.0.0":
+                    sock.setsockopt(
+                        socket.IPPROTO_IP,
+                        socket.IP_MULTICAST_IF,
+                        socket.inet_aton(interface_ip),
+                    )
+            except OSError:
+                pass
+            membership_interface = interface_ip if interface_ip != "0.0.0.0" else "0.0.0.0"
+            membership = struct.pack(
+                "4s4s",
+                socket.inet_aton(self._group),
+                socket.inet_aton(membership_interface),
+            )
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
             sock.settimeout(self._socket_timeout_seconds)
 
@@ -110,11 +170,21 @@ class MulticastDiscoveryResponder:
                 if message.get("node_id") == self._node_id:
                     continue
 
+                reply_address = self._advertise
+                if self._prefer_current_assigned_ip:
+                    detected = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
+                    if detected == "0.0.0.0":
+                        detected = _detect_current_node_address(self._bind_host)
+                    try:
+                        reply_address = NodeAddress(host=detected, port=self._advertise.port)
+                    except ValueError:
+                        reply_address = self._advertise
+
                 reply = {
                     "kind": _DISCOVER_REPLY,
                     "cluster": self._cluster_name,
                     "node_id": self._node_id,
-                    "address": self._advertise.as_dict(),
+                    "address": reply_address.as_dict(),
                 }
                 raw = json.dumps(reply, separators=(",", ":"), sort_keys=True).encode("utf-8")
                 try:
@@ -152,20 +222,39 @@ def discover_multicast_peers(
         Unique peer addresses discovered from multicast listeners.
     """
     discovered: dict[tuple[str, int], NodeAddress] = {}
+    probe_address = config.advertise_address
+    if bool(getattr(config, "_auto_advertise_host", False)):
+        detected = _current_multicast_interface_ip(config.bind.host, config.advertise_address.host)
+        if detected == "0.0.0.0":
+            detected = _detect_current_node_address(config.bind.host)
+        try:
+            probe_address = NodeAddress(host=detected, port=config.bind.port)
+        except ValueError:
+            probe_address = config.advertise_address
     probe = {
         "kind": _DISCOVER,
         "cluster": config.cluster_name,
         "node_id": node_id,
-        "address": config.advertise_address.as_dict(),
+        "address": probe_address.as_dict(),
     }
     wire = json.dumps(probe, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     for _ in range(max(1, config.multicast.discovery_attempts)):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
+            interface_ip = _current_multicast_interface_ip(config.bind.host, probe_address.host)
             ttl = int(config.multicast.ttl)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", ttl))
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+            try:
+                if interface_ip != "0.0.0.0":
+                    sock.setsockopt(
+                        socket.IPPROTO_IP,
+                        socket.IP_MULTICAST_IF,
+                        socket.inet_aton(interface_ip),
+                    )
+            except OSError:
+                pass
             sock.settimeout(socket_timeout_seconds)
 
             sock.sendto(wire, (config.multicast.group, config.multicast.port))

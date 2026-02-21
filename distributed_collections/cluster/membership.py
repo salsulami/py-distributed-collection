@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -9,6 +10,8 @@ from ..discovery import (
     discover_static_peers,
     merge_discovery_results,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ClusterMembershipMixin:
@@ -79,13 +82,30 @@ class ClusterMembershipMixin:
                     self._member_nodes[node_id] = address
             return
         remote_count = 0
+        is_new_member = False
         with self._members_lock:
+            is_new_member = address not in self._members
             self._members.add(address)
             remote_count = len(self._members)
             if node_id:
                 self._member_nodes[node_id] = address
         with self._member_failures_lock:
             self._member_failures.pop(address, None)
+        if is_new_member:
+            member_label = node_id if node_id else "unknown"
+            _LOGGER.info(
+                "Cluster member joined: node_id=%s address=%s:%s remote_members=%d",
+                member_label,
+                address.host,
+                address.port,
+                remote_count,
+            )
+            self._trace(
+                "member_joined",
+                member_node_id=member_label,
+                member_address=address.as_dict(),
+                remote_member_count=remote_count,
+            )
         if remote_count > 0 and self.config.consensus.require_majority_for_writes:
             # Force immediate lease refresh when cluster size changes.
             with self._consensus_lock:

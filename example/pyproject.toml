@@ -9,6 +9,8 @@ description = "Installable example project for distributed-python-collections."
 requires-python = ">=3.10"
 dependencies = [
   "distributed-python-collections>=0.1.4",
+  "fastapi",
+  "uvicorn",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +20,7 @@ redis = [
 
 [project.scripts]
 dpc-example = "dpc_example.demo:main"
+dpc-example-api = "dpc_example.fastapi_app:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -29,6 +29,7 @@ class ClusterDurabilityMixin:
             state: dict[str, Any]
             metadata: dict[str, Any]
             has_cp_payload = False
+            has_ttl_payload = False
             if "state" in payload and isinstance(payload.get("state"), dict):
                 state = dict(payload["state"])
                 raw_meta = payload.get("metadata", {})
@@ -36,14 +37,20 @@ class ClusterDurabilityMixin:
                 has_cp_payload = "cp" in payload
                 raw_cp = payload.get("cp", {})
                 cp_payload = dict(raw_cp) if isinstance(raw_cp, dict) else {}
+                has_ttl_payload = "ttl" in payload
+                raw_ttl = payload.get("ttl", {})
+                ttl_payload = dict(raw_ttl) if isinstance(raw_ttl, dict) else {}
             else:
                 # Backward compatibility with old snapshot format.
                 state = payload
                 metadata = {}
                 cp_payload = {}
+                ttl_payload = {}
             self._store.load_snapshot(state)
             if has_cp_payload:
                 self._load_cp_snapshot_payload(cp_payload)
+            if has_ttl_payload:
+                self._load_ttl_snapshot_payload(ttl_payload)
             with self._consensus_lock:
                 self._last_applied_index = int(metadata.get("last_applied_index", 0))
                 self._next_log_index = max(self._last_applied_index + 1, 1)
@@ -175,7 +182,12 @@ class ClusterDurabilityMixin:
                 "timestamp_ms": int(time.time() * 1000),
             }
         state = {} if self._store_is_centralized else self._store.create_snapshot()
-        return {"state": state, "metadata": metadata, "cp": self._cp_snapshot_payload()}
+        return {
+            "state": state,
+            "metadata": metadata,
+            "cp": self._cp_snapshot_payload(),
+            "ttl": self._ttl_snapshot_payload(),
+        }
 
     def _handshake_peer(self, peer: NodeAddress) -> dict[str, Any] | None:
         """
@@ -251,6 +263,7 @@ class ClusterDurabilityMixin:
         Load snapshot payload returned by peer state sync.
         """
         has_cp_payload = False
+        has_ttl_payload = False
         if "state" in payload and isinstance(payload.get("state"), dict):
             state = dict(payload["state"])
             metadata_raw = payload.get("metadata", {})
@@ -258,14 +271,20 @@ class ClusterDurabilityMixin:
             has_cp_payload = "cp" in payload
             raw_cp = payload.get("cp", {})
             cp_payload = dict(raw_cp) if isinstance(raw_cp, dict) else {}
+            has_ttl_payload = "ttl" in payload
+            raw_ttl = payload.get("ttl", {})
+            ttl_payload = dict(raw_ttl) if isinstance(raw_ttl, dict) else {}
         else:
             state = payload
             metadata = {}
             cp_payload = {}
+            ttl_payload = {}
         if not self._store_is_centralized:
             self._store.load_snapshot(state)
         if has_cp_payload:
             self._load_cp_snapshot_payload(cp_payload)
+        if has_ttl_payload:
+            self._load_ttl_snapshot_payload(ttl_payload)
         with self._consensus_lock:
             self._last_applied_index = int(metadata.get("last_applied_index", self._last_applied_index))
             self._next_log_index = max(self._last_applied_index + 1, self._next_log_index)

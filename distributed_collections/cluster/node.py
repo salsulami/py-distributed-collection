@@ -31,6 +31,7 @@ from ..store_protocol import CollectionStore
 from ..transport import TcpTransportServer
 from ..wal import WriteAheadLog
 from .consensus import ClusterConsensusMixin
+from .collection_events import ClusterCollectionEventsMixin
 from .cp import ClusterCPMixin
 from .diagnostics import ClusterDiagnosticsMixin
 from .durability import ClusterDurabilityMixin
@@ -45,6 +46,7 @@ from .replication import ClusterReplicationMixin
 from .security import ClusterSecurityMixin
 from .topics import ClusterTopicMixin
 from .transport import ClusterTransportMixin
+from .ttl import ClusterTTLMixin
 
 
 class ClusterNode(
@@ -53,6 +55,7 @@ class ClusterNode(
     ClusterMembershipMixin,
     ClusterHandleMixin,
     ClusterTransportMixin,
+    ClusterCollectionEventsMixin,
     ClusterOperationMixin,
     ClusterReplicationMixin,
     ClusterDurabilityMixin,
@@ -60,6 +63,7 @@ class ClusterNode(
     ClusterSecurityMixin,
     ClusterObservabilityMixin,
     ClusterHelperMixin,
+    ClusterTTLMixin,
     ClusterCPMixin,
     ClusterTopicMixin,
     ClusterPrimitiveAdapterMixin,
@@ -195,6 +199,24 @@ class ClusterNode(
         # Topic subscriber state
         self._topic_subscribers: dict[str, dict[str, Callable[[Any], None]]] = {}
         self._topic_lock = threading.RLock()
+
+        # Collection item listener state
+        self._collection_listener_lock = threading.RLock()
+        self._collection_listeners: dict[
+            tuple[str, str], dict[str, Callable[[dict[str, Any]], None]]
+        ] = {}
+
+        # Component-level TTL config/runtime state
+        self._ttl_lock = threading.RLock()
+        self._map_ttl_seconds: dict[str, float] = dict(self.config.collection_ttl.map_ttl_seconds)
+        self._list_ttl_seconds: dict[str, float] = dict(self.config.collection_ttl.list_ttl_seconds)
+        self._queue_ttl_seconds: dict[str, float] = dict(self.config.collection_ttl.queue_ttl_seconds)
+        self._ttl_map_entries: dict[str, dict[str, int]] = {}
+        self._ttl_list_entries: dict[str, list[dict[str, Any] | None]] = {}
+        self._ttl_queue_entries: dict[str, deque[dict[str, Any] | None]] = {}
+        self._ttl_snapshot_loaded = False
+        self._ttl_stop = threading.Event()
+        self._ttl_thread: threading.Thread | None = None
 
         # Public handle caches
         self._map_handles: dict[str, DistributedMap] = {}

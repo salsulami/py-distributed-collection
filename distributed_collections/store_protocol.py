@@ -28,7 +28,13 @@ class CollectionStore(Protocol):
     """
 
     def apply_mutation(self, mutation: dict[str, Any]) -> Any:
-        """Apply one collection mutation and return action-specific result."""
+        """
+        Apply one collection mutation and return action-specific result.
+
+        Implementations may return structured dictionaries that include mutation
+        metadata (for example ``removed`` flags or previous values) used by
+        listeners and TTL eviction logic.
+        """
 
     def map_get(self, name: str, key: str, default: Any = None) -> Any:
         """Return map value or default when key is missing."""

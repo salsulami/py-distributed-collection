@@ -94,7 +94,8 @@ class ClusterMembershipMixin:
         if is_new_member:
             member_label = node_id if node_id else "unknown"
             _LOGGER.info(
-                "Cluster member joined: node_id=%s address=%s:%s remote_members=%d",
+                "Member joined cluster: cluster=%s node_id=%s host=%s port=%s remote_members=%d",
+                self.config.cluster_name,
                 member_label,
                 address.host,
                 address.port,

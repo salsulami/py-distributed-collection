@@ -125,12 +125,33 @@ class ClusterMembershipMixin:
                 self._member_failures.pop(peer, None)
                 evict = True
         if evict:
+            stale_nodes: list[str] = []
             with self._members_lock:
                 self._members.discard(peer)
                 stale_nodes = [node_id for node_id, addr in self._member_nodes.items() if addr == peer]
                 for node_id in stale_nodes:
                     self._member_nodes.pop(node_id, None)
             self._inc_stat("members_evicted")
+            members_view, total_members = self._cluster_members_log_view()
+            member_node_id = ",".join(stale_nodes) if stale_nodes else "unknown"
+            _LOGGER.info(
+                "Member left cluster: cluster=%s node_id=%s host=%s port=%s heartbeat_failures=%d members=%s total_members=%d",
+                self.config.cluster_name,
+                member_node_id,
+                peer.host,
+                peer.port,
+                count,
+                members_view,
+                total_members,
+            )
+            self._trace(
+                "member_left",
+                member_node_id=member_node_id,
+                member_address=peer.as_dict(),
+                heartbeat_failures=count,
+                members=members_view,
+                total_members=total_members,
+            )
 
     def _clear_member_failure(self, peer: NodeAddress) -> None:
         """Clear peer failure counter after successful delivery."""

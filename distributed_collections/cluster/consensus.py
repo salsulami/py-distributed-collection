@@ -191,6 +191,11 @@ class ClusterConsensusMixin:
         with self._consensus_lock:
             return self._leader_id == self.node_id
 
+    @property
+    def is_leader(self) -> bool:
+        """Return whether this node is currently the elected cluster leader."""
+        return self._is_leader()
+
     def _leader_lease_valid(self) -> bool:
         """Return true when leader still has quorum lease."""
         if not self.config.consensus.enabled:

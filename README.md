@@ -299,6 +299,7 @@ Node API equivalents:
 - `node.metrics_text()`
 - `node.recent_traces()`
 - `node.stats()`
+- `node.is_leader` (bool property)
 
 ---
 
@@ -319,6 +320,7 @@ Node API equivalents:
 - `stop()`
 - `close()`
 - `is_running` (property)
+- `is_leader` (property)
 - `stats()`
 - `health()`
 - `metrics_text()`

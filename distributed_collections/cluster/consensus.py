@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import random
 import threading
 import time
@@ -7,6 +8,8 @@ import time
 from ..config import NodeAddress
 from ..protocol import MessageKind
 from ..transport import request_response
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ClusterConsensusMixin:
@@ -135,6 +138,8 @@ class ClusterConsensusMixin:
         """
         if not self._is_leader():
             return
+        members_view, total_members = self._cluster_members_log_view()
+        _LOGGER.info("Heartbeat %s total_members=%d", members_view, total_members)
         self._inc_stat("leader_heartbeats_sent")
         with self._consensus_lock:
             term = self._term

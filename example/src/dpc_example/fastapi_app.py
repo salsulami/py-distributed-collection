@@ -7,7 +7,9 @@ settings, then write to one instance and read from another.
 
 from __future__ import annotations
 
+import logging
 import os
+import socket
 import threading
 from collections import deque
 from typing import Any
@@ -26,6 +28,7 @@ from distributed_collections import (
 from fastapi import FastAPI, HTTPException
 
 app = FastAPI(title="distributed-python-collections FastAPI example", version="0.1.0")
+_LOGGER = logging.getLogger(__name__)
 
 _topic_lock = threading.RLock()
 _topic_subscription_ids: dict[str, str] = {}
@@ -33,6 +36,7 @@ _topic_messages: dict[str, deque[Any]] = {}
 _TOPIC_HISTORY_SIZE = 200
 
 _node: ClusterNode | None = None
+_PORT_SCAN_LIMIT = 200
 
 
 def _get_env(name: str, default: str) -> str:
@@ -51,6 +55,26 @@ def _parse_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise RuntimeError(f"Environment variable {name} must be an integer.") from exc
+
+
+def _find_first_available_port(host: str, preferred_port: int, *, scan_limit: int = _PORT_SCAN_LIMIT) -> int:
+    if preferred_port <= 0:
+        raise RuntimeError("Port value must be >= 1.")
+    for offset in range(max(1, int(scan_limit))):
+        candidate = preferred_port + offset
+        if candidate > 65535:
+            break
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, candidate))
+            except OSError:
+                continue
+        return candidate
+    raise RuntimeError(
+        f"Could not find an available TCP port from {preferred_port} "
+        f"within {scan_limit} attempts on host {host!r}."
+    )
 
 
 def _parse_seeds(raw_seeds: str) -> list[NodeAddress]:
@@ -79,6 +103,7 @@ def _parse_seeds(raw_seeds: str) -> list[NodeAddress]:
 
 def _build_cluster_config() -> ClusterConfig:
     bind_host = _get_env("DPC_BIND_HOST", "0.0.0.0")
+    bind_port_env = _get_env_optional("DPC_BIND_PORT")
     bind_port = _parse_int("DPC_BIND_PORT", 5711)
     cluster_name = _get_env("DPC_CLUSTER_NAME", "dpc-fastapi-example")
     advertise_host = _get_env_optional("DPC_ADVERTISE_HOST")
@@ -102,6 +127,17 @@ def _build_cluster_config() -> ClusterConfig:
         config_kwargs["static_discovery"] = StaticDiscoveryConfig(seeds=static_seeds)
     elif discovery_name != "multicast":
         raise RuntimeError("DPC_DISCOVERY must be one of: multicast, static, both.")
+
+    if bind_port_env is None:
+        chosen_bind_port = _find_first_available_port(bind_host, bind_port)
+        if chosen_bind_port != bind_port:
+            _LOGGER.warning(
+                "Default cluster bind port %s is in use; selected %s instead.",
+                bind_port,
+                chosen_bind_port,
+            )
+        bind_port = chosen_bind_port
+        config_kwargs["bind"] = NodeAddress(bind_host, bind_port)
 
     return ClusterConfig(**config_kwargs)
 
@@ -305,7 +341,17 @@ def topic_messages(name: str) -> dict[str, Any]:
 
 def main() -> int:
     host = _get_env("DPC_API_HOST", "0.0.0.0")
+    api_port_env = _get_env_optional("DPC_API_PORT")
     port = _parse_int("DPC_API_PORT", 8000)
+    if api_port_env is None:
+        chosen_api_port = _find_first_available_port(host, port)
+        if chosen_api_port != port:
+            _LOGGER.warning(
+                "Default API port %s is in use; selected %s instead.",
+                port,
+                chosen_api_port,
+            )
+        port = chosen_api_port
     uvicorn.run("dpc_example.fastapi_app:app", host=host, port=port, reload=False)
     return 0
 

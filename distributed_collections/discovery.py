@@ -12,6 +12,7 @@ attempt TCP handshakes with the union of addresses.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -134,7 +135,23 @@ class MulticastDiscoveryResponder:
         try:
             interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", self._port))
+            try:
+                if hasattr(socket, "SO_REUSEPORT"):
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+            try:
+                sock.bind(("", self._port))
+            except OSError as exc:
+                if exc.errno in {errno.EADDRINUSE, 48, 98}:
+                    _LOGGER.warning(
+                        "Multicast responder port already in use; skipping responder for this node. "
+                        "port=%s reason=%s",
+                        self._port,
+                        exc,
+                    )
+                    return
+                raise
             try:
                 if interface_ip != "0.0.0.0":
                     sock.setsockopt(
@@ -144,13 +161,31 @@ class MulticastDiscoveryResponder:
                     )
             except OSError:
                 pass
-            membership_interface = interface_ip if interface_ip != "0.0.0.0" else "0.0.0.0"
-            membership = struct.pack(
-                "4s4s",
-                socket.inet_aton(self._group),
-                socket.inet_aton(membership_interface),
-            )
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+            membership_interfaces = [interface_ip]
+            if interface_ip != "0.0.0.0":
+                membership_interfaces.append("0.0.0.0")
+            joined_group = False
+            for membership_interface in membership_interfaces:
+                try:
+                    membership = struct.pack(
+                        "4s4s",
+                        socket.inet_aton(self._group),
+                        socket.inet_aton(membership_interface),
+                    )
+                    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                    joined_group = True
+                    break
+                except OSError:
+                    continue
+            if not joined_group:
+                _LOGGER.warning(
+                    "Failed to join multicast group; responder disabled. "
+                    "group=%s port=%s interface_ip=%s",
+                    self._group,
+                    self._port,
+                    interface_ip,
+                )
+                return
             sock.settimeout(self._socket_timeout_seconds)
 
             while not self._stop.is_set():
@@ -247,27 +282,42 @@ def discover_multicast_peers(
             interface_ip = _current_multicast_interface_ip(config.bind.host, probe_address.host)
             ttl = int(config.multicast.ttl)
             sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, struct.pack("b", ttl))
-            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
-            try:
-                if interface_ip != "0.0.0.0":
-                    sock.setsockopt(
-                        socket.IPPROTO_IP,
-                        socket.IP_MULTICAST_IF,
-                        socket.inet_aton(interface_ip),
-                    )
-            except OSError:
-                pass
+            # Keep multicast loopback enabled so multiple local instances can
+            # discover each other on the same host.
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
             sock.settimeout(socket_timeout_seconds)
-            try:
-                sock.sendto(wire, (config.multicast.group, config.multicast.port))
-            except OSError as exc:
+
+            send_interfaces = [interface_ip]
+            if interface_ip != "0.0.0.0":
+                send_interfaces.extend(["0.0.0.0", "127.0.0.1"])
+            deduped_send_interfaces: list[str] = []
+            for candidate in send_interfaces:
+                if candidate not in deduped_send_interfaces:
+                    deduped_send_interfaces.append(candidate)
+
+            sent = False
+            last_error: OSError | None = None
+            for send_interface in deduped_send_interfaces:
+                try:
+                    if send_interface != "0.0.0.0":
+                        sock.setsockopt(
+                            socket.IPPROTO_IP,
+                            socket.IP_MULTICAST_IF,
+                            socket.inet_aton(send_interface),
+                        )
+                    sock.sendto(wire, (config.multicast.group, config.multicast.port))
+                    sent = True
+                except OSError as exc:
+                    last_error = exc
+                    continue
+            if not sent:
                 _LOGGER.warning(
                     "Multicast probe send failed; continuing without multicast peers. "
                     "group=%s port=%s interface_ip=%s reason=%s",
                     config.multicast.group,
                     config.multicast.port,
                     interface_ip,
-                    exc,
+                    last_error,
                 )
                 continue
 

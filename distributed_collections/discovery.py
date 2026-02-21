@@ -130,16 +130,39 @@ class MulticastDiscoveryResponder:
         if self._thread:
             self._thread.join(timeout=1.0)
 
-    def _run(self) -> None:
+    def _resolve_reply_address(self) -> NodeAddress:
+        """
+        Resolve advertised address used in discovery replies.
+
+        When auto-advertise behavior is enabled, prefer the currently assigned
+        node interface IP to mirror Hazelcast-style multicast identity.
+        """
+        if not self._prefer_current_assigned_ip:
+            return self._advertise
+        detected = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
+        if detected == "0.0.0.0":
+            detected = _detect_current_node_address(self._bind_host)
+        try:
+            return NodeAddress(host=detected, port=self._advertise.port)
+        except ValueError:
+            return self._advertise
+
+    def _open_receiver_socket(self, interface_ip: str) -> socket.socket | None:
+        """
+        Open and configure multicast receiver socket.
+
+        Returns ``None`` when receiver cannot be started, allowing caller to
+        degrade gracefully instead of failing node startup.
+        """
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
-            interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 if hasattr(socket, "SO_REUSEPORT"):
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             except OSError:
                 pass
+
             try:
                 sock.bind(("", self._port))
             except OSError as exc:
@@ -150,17 +173,9 @@ class MulticastDiscoveryResponder:
                         self._port,
                         exc,
                     )
-                    return
+                    return None
                 raise
-            try:
-                if interface_ip != "0.0.0.0":
-                    sock.setsockopt(
-                        socket.IPPROTO_IP,
-                        socket.IP_MULTICAST_IF,
-                        socket.inet_aton(interface_ip),
-                    )
-            except OSError:
-                pass
+
             membership_interfaces = [interface_ip]
             if interface_ip != "0.0.0.0":
                 membership_interfaces.append("0.0.0.0")
@@ -174,9 +189,9 @@ class MulticastDiscoveryResponder:
                     )
                     sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
                     joined_group = True
-                    break
                 except OSError:
                     continue
+
             if not joined_group:
                 _LOGGER.warning(
                     "Failed to join multicast group; responder disabled. "
@@ -185,12 +200,27 @@ class MulticastDiscoveryResponder:
                     self._port,
                     interface_ip,
                 )
-                return
-            sock.settimeout(self._socket_timeout_seconds)
+                return None
 
+            sock.settimeout(self._socket_timeout_seconds)
+            return sock
+        except Exception:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+
+    def _run(self) -> None:
+        interface_ip = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
+        recv_sock = self._open_receiver_socket(interface_ip)
+        if recv_sock is None:
+            return
+        send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        try:
             while not self._stop.is_set():
                 try:
-                    payload, sender = sock.recvfrom(65535)
+                    payload, sender = recv_sock.recvfrom(65535)
                 except socket.timeout:
                     continue
                 except OSError:
@@ -207,16 +237,7 @@ class MulticastDiscoveryResponder:
                 if message.get("node_id") == self._node_id:
                     continue
 
-                reply_address = self._advertise
-                if self._prefer_current_assigned_ip:
-                    detected = _current_multicast_interface_ip(self._bind_host, self._advertise.host)
-                    if detected == "0.0.0.0":
-                        detected = _detect_current_node_address(self._bind_host)
-                    try:
-                        reply_address = NodeAddress(host=detected, port=self._advertise.port)
-                    except ValueError:
-                        reply_address = self._advertise
-
+                reply_address = self._resolve_reply_address()
                 reply = {
                     "kind": _DISCOVER_REPLY,
                     "cluster": self._cluster_name,
@@ -225,12 +246,16 @@ class MulticastDiscoveryResponder:
                 }
                 raw = json.dumps(reply, separators=(",", ":"), sort_keys=True).encode("utf-8")
                 try:
-                    sock.sendto(raw, sender)
+                    send_sock.sendto(raw, sender)
                 except OSError:
                     continue
         finally:
             try:
-                sock.close()
+                recv_sock.close()
+            except OSError:
+                pass
+            try:
+                send_sock.close()
             except OSError:
                 pass
 

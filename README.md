@@ -82,11 +82,12 @@ Node-to-node collection replication for map/list/queue is skipped
 
 ### Runtime responsibilities
 
-- **ClusterNode**
-  - membership, discovery, leader election, write routing
-  - transport/auth/version checks
-  - consistency commit strategy
-  - observability and lifecycle orchestration
+- **ClusterNode (new modular implementation in `distributed_collections.cluster`)**
+  - membership + discovery + member failure/eviction: `cluster/membership.py` + `discovery.py`
+  - leader election + heartbeat lease + write routing: `cluster/consensus.py` + `cluster/operations.py`
+  - transport + auth + protocol compatibility checks: `cluster/transport.py` + `cluster/security.py`
+  - consistency commit strategy (best-effort/quorum/all/linearizable): `cluster/operations.py`
+  - observability + runtime lifecycle orchestration: `cluster/observability.py` + `cluster/lifecycle.py`
 - **CollectionStore backends**
   - apply/read snapshot lifecycle for collection state
   - pluggable backend contract

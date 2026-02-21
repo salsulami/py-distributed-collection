@@ -13,6 +13,7 @@ attempt TCP handshakes with the union of addresses.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import struct
@@ -24,6 +25,7 @@ from .config import ClusterConfig, NodeAddress, _detect_current_node_address
 
 _DISCOVER = "discover"
 _DISCOVER_REPLY = "discover_reply"
+_LOGGER = logging.getLogger(__name__)
 
 
 def _resolve_ipv4_host(host: str) -> str | None:
@@ -256,8 +258,18 @@ def discover_multicast_peers(
             except OSError:
                 pass
             sock.settimeout(socket_timeout_seconds)
-
-            sock.sendto(wire, (config.multicast.group, config.multicast.port))
+            try:
+                sock.sendto(wire, (config.multicast.group, config.multicast.port))
+            except OSError as exc:
+                _LOGGER.warning(
+                    "Multicast probe send failed; continuing without multicast peers. "
+                    "group=%s port=%s interface_ip=%s reason=%s",
+                    config.multicast.group,
+                    config.multicast.port,
+                    interface_ip,
+                    exc,
+                )
+                continue
 
             deadline = time.monotonic() + float(config.multicast.timeout_seconds)
             while time.monotonic() < deadline:
